@@ -96,6 +96,13 @@
       -webkit-user-select: none; user-select: none;
       -webkit-touch-callout: none;
     }
+    /* Mobile Safari zooms the whole viewport when focusing a field whose
+       font is under 16px — that's the screen "bounce" on tapping an input.
+       Bump fields to 16px on touch devices so focusing never zooms. */
+    @media (hover: none) and (pointer: coarse) {
+      input, textarea, select { font-size: 16px !important; }
+    }
+    input, textarea, button { touch-action: manipulation; }
     /* Touch devices: no drag handles (long-press drags instead) and no
        hover-revealed buttons (swipe left reveals rename/delete instead). */
     @media (hover: none) and (pointer: coarse) {
@@ -315,6 +322,19 @@
     // Categories whose "Add an item…" input is currently revealed by the
     // header + button.
     const openAdders = new Set();
+
+    // The mobile keyboard's check/done key dismisses the keyboard (a blur)
+    // without submitting. On touch devices, accept whatever was typed when
+    // the field blurs with content. Enter-submits clear the field *before*
+    // awaiting the API call, so an Enter-then-blur sequence can't double-add.
+    function commitOnBlur(ev) {
+      if (!IS_TOUCH) return;
+      const input = ev.target;
+      if (!input.value.trim() || !input.form) return;
+      if (input.form.requestSubmit) input.form.requestSubmit();
+      else input.form.dispatchEvent(new Event('submit', { cancelable: true }));
+    }
+
     function toggleAdder(catId) {
       if (openAdders.has(catId)) openAdders.delete(catId);
       else openAdders.add(catId);
@@ -475,7 +495,8 @@
 
         <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
           <span class="text-zinc-400 dark:text-zinc-600 text-sm select-none">+</span>
-          <input name="name" placeholder="New category…" autocomplete="off"
+          <input name="name" placeholder="New category…" autocomplete="off" enterkeyhint="done"
+                 onblur="commitOnBlur(event)"
                  class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
         </form>
       `;
@@ -523,8 +544,8 @@
           ${openAdders.has(c.id) ? `
           <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
             <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
-            <input name="text" placeholder="Add an item…" autocomplete="off"
-                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})"
+            <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
+                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
                    class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
           </form>` : ''}
           <div class="active-items space-y-0.5">
@@ -628,16 +649,15 @@
       const input = ev.target.elements.name;
       const name = input.value.trim();
       if (!name) return false;
+      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
         const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
         current.categories.push(category);
         // Re-render all sections so the new (empty → active) category lands
         // above any fully-completed ones; the form itself isn't re-rendered,
-        // so input focus survives.
+        // so input focus (when it still has it) survives on its own.
         repaintAllCategories();
-        input.value = '';
-        input.focus();
-      } catch (e) { toast(e.message); }
+      } catch (e) { toast(e.message); input.value = name; }
       return false;
     }
 
@@ -677,6 +697,8 @@
       const input = ev.target.elements.text;
       const text = input.value.trim();
       if (!text) return false;
+      const hadFocus = document.activeElement === input;
+      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
         const pre = isCatFullyDone(categoryId);
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
@@ -684,9 +706,12 @@
         if (isCatFullyDone(categoryId) !== pre) {
           // Category left the fully-done group — full re-render, then put the
           // caret back without scrolling (avoids the keyboard/scroll bounce).
+          // Skip the refocus when the keyboard was already dismissed.
           repaintAllCategories();
-          const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
-          if (next) next.focus({ preventScroll: true });
+          if (hadFocus) {
+            const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+            if (next) next.focus({ preventScroll: true });
+          }
         } else {
           // Insert just the new row; the form (and its focus) is untouched,
           // so the view stays perfectly still.
@@ -696,9 +721,8 @@
             if (ph) ph.remove();
             body.insertAdjacentHTML('afterbegin', renderItem(item));
           }
-          input.value = '';
         }
-      } catch (e) { toast(e.message); }
+      } catch (e) { toast(e.message); input.value = text; }
       return false;
     }
 
