@@ -260,11 +260,15 @@ async function importCategoriesInto(client, listId, categories, username) {
     for (const it of c.items) {
       const checked = !!it.checked;
       counters[checked]++;
+      // completed_at / last_checked_by are computed here rather than via
+      // CASE WHEN $n expressions — reusing a parameter in contexts with
+      // different deduced types makes Postgres fail with "inconsistent
+      // types deduced for parameter".
       await client.query(
         `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by)
-         VALUES ($1, $2, $3, $4, CASE WHEN $3 THEN NOW() ELSE NULL END, $5,
-                 CASE WHEN $3 THEN $5 ELSE NULL END)`,
-        [catId, it.text.trim(), checked, counters[checked], username]);
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [catId, it.text.trim(), checked, counters[checked],
+         checked ? new Date() : null, username, checked ? username : null]);
     }
   }
 }
@@ -280,9 +284,8 @@ app.post('/api/lists/import', async (req, res) => {
     const { rows } = await client.query(
       `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING *`,
       [name, req.user.id, req.user.username]);
-    await client.query(
-      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0)`,
-      [rows[0].id]);
+    // No pre-created "General" here — the imported categories themselves
+    // satisfy the at-least-one-category rule (payload is validated non-empty).
     await importCategoriesInto(client, rows[0].id, req.body.categories, req.user.username);
     await client.query('COMMIT');
     res.json({ list: rows[0] });
@@ -390,41 +393,22 @@ app.patch('/api/categories/:id', async (req, res) => {
   }
 });
 
-// Delete a category. By default its items move to the list's default
-// category; with ?deleteItems=1 the items are deleted along with it
-// (the FK cascade handles that). The default category itself can't be
-// deleted.
+// Delete a category and its items (FK cascade). Any category can be deleted
+// — including "General" — as long as it isn't the list's last one; every
+// list must keep at least one category so new items have a home.
 app.delete('/api/categories/:id', async (req, res) => {
-  const client = await pool.connect();
   try {
     const { category, role } = await getCategoryAccess(req.params.id, req.user);
     if (!category || !role) return res.status(404).json({ error: 'Category not found' });
-    if (category.is_default) return res.status(400).json({ error: "The default category can't be deleted" });
-    const deleteItems = req.query.deleteItems === '1' || req.query.deleteItems === 'true';
-
-    await client.query('BEGIN');
-    if (!deleteItems) {
-      const def = await client.query(
-        `SELECT id FROM categories WHERE list_id = $1 AND is_default LIMIT 1`, [category.list_id]);
-      const defaultId = def.rows[0].id;
-      // Re-sequence moved items after the default category's existing ones,
-      // keeping unchecked and checked orderings intact.
-      await client.query(
-        `UPDATE items SET
-           category_id = $1,
-           sort_order = sort_order + COALESCE((SELECT MAX(sort_order) FROM items WHERE category_id = $1), 0) + 1
-         WHERE category_id = $2`,
-        [defaultId, category.id]
-      );
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM categories WHERE list_id = $1`, [category.list_id]);
+    if (rows[0].n <= 1) {
+      return res.status(400).json({ error: "Can't delete the only category — lists need at least one" });
     }
-    await client.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
-    await client.query('COMMIT');
+    await pool.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
     res.json({ ok: true });
   } catch (err) {
-    await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
   }
 });
 

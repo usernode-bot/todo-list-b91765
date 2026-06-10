@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -66,6 +66,18 @@
   <title>Todo List</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
+  <script>
+    // Apply the theme before first paint to avoid a flash. Explicit choice in
+    // localStorage wins; otherwise follow the system preference.
+    (function () {
+      try {
+        var pref = localStorage.getItem('todo:theme');
+        var dark = pref === 'dark' ||
+          (pref !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+      } catch (_) {}
+    })();
+  </script>
   <style>
     .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
     .pencil-host:hover .pencil { opacity: 1; }
@@ -79,46 +91,46 @@
     .dragging { opacity: 0.4; }
   </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen">
+<body class="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
 
   <!-- Members modal -->
-  <div id="modal-backdrop" class="hidden fixed inset-0 bg-black/60 z-40"></div>
+  <div id="modal-backdrop" class="hidden fixed inset-0 bg-black/40 dark:bg-black/60 z-40"></div>
   <div id="members-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-    <div class="pointer-events-auto bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
+    <div class="pointer-events-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
       <div class="flex items-center justify-between mb-4">
         <h2 class="font-semibold text-lg">Members</h2>
-        <button onclick="closeMembers()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
+        <button onclick="closeMembers()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
       </div>
       <div id="members-body"></div>
     </div>
   </div>
 
   <!-- Markdown import/export modal -->
-  <div id="md-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
-    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
+  <div id="md-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 dark:bg-black/60">
+    <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
       <div class="flex items-center justify-between">
         <h2 id="md-title" class="font-semibold text-lg"></h2>
-        <button onclick="closeMd()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
+        <button onclick="closeMd()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
       </div>
       <p id="md-hint" class="text-xs text-zinc-500"></p>
       <textarea id="md-text" rows="14" spellcheck="false"
-                class="w-full flex-1 bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-xs font-mono text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-violet-600 resize-none"></textarea>
+                class="w-full flex-1 bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg p-3 text-xs font-mono text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-700 focus:outline-none focus:border-violet-600 resize-none"></textarea>
       <div id="md-actions" class="flex justify-end gap-2"></div>
     </div>
   </div>
 
   <!-- Prompt/confirm/choice dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
-  <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
-    <form id="dialog-form" class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
-      <p id="dialog-title" class="text-sm text-zinc-300 mb-3"></p>
+  <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 dark:bg-black/60">
+    <form id="dialog-form" class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
+      <p id="dialog-title" class="text-sm text-zinc-700 dark:text-zinc-300 mb-3"></p>
       <input id="dialog-input" autocomplete="off"
-             class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600 mb-4">
+             class="w-full bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600 mb-4">
       <div id="dialog-buttons" class="flex justify-end gap-2 flex-wrap"></div>
     </form>
   </div>
 
-  <div id="toast" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-zinc-800 border border-zinc-700 text-sm px-4 py-2 rounded-lg shadow-lg z-50"></div>
+  <div id="toast" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-sm px-4 py-2 rounded-lg shadow-lg z-50"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -145,8 +157,12 @@
       toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
     }
 
+    // Shared class strings for both themes.
+    const BTN_SOFT = 'bg-zinc-200 hover:bg-zinc-300 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-300';
+    const DRAWER_ITEM = 'w-full text-left px-3.5 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800';
+
     // Promise-based replacements for prompt()/confirm(), plus a multi-choice
-    // mode used by "delete category".
+    // mode.
     let dialogResolve = null;
     let dialogChoices = null;
     const dialogEl = document.getElementById('dialog');
@@ -161,7 +177,7 @@
         dialogInput.classList.toggle('hidden', !withInput);
         dialogInput.value = value;
         const btns = document.getElementById('dialog-buttons');
-        let html = '<button type="button" data-dlg="cancel" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>';
+        let html = `<button type="button" data-dlg="cancel" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>`;
         if (choices) {
           html += choices.map((c, i) =>
             `<button type="button" data-dlg="${i}" class="text-sm px-3 py-1.5 rounded-lg text-white ${c.danger ? 'bg-red-600 hover:bg-red-500' : 'bg-violet-600 hover:bg-violet-500'}">${esc(c.label)}</button>`
@@ -200,6 +216,40 @@
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    // --- theme (light / dark / system) ----------------------------------------
+    const THEME_KEY = 'todo:theme';
+    function themePref() {
+      const v = localStorage.getItem(THEME_KEY);
+      return v === 'light' || v === 'dark' ? v : 'system';
+    }
+    function applyTheme() {
+      const pref = themePref();
+      const dark = pref === 'dark' ||
+        (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.classList.toggle('dark', dark);
+    }
+    function themeLabel() {
+      const pref = themePref();
+      return pref === 'light' ? '☀️ Light' : pref === 'dark' ? '🌙 Dark' : '🌓 System';
+    }
+    function cycleTheme() {
+      const order = ['system', 'light', 'dark'];
+      const next = order[(order.indexOf(themePref()) + 1) % 3];
+      if (next === 'system') localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, next);
+      applyTheme();
+      updateThemeLabels();
+    }
+    function updateThemeLabels() {
+      const drawerBtn = document.getElementById('theme-btn');
+      if (drawerBtn) drawerBtn.textContent = 'Theme: ' + themeLabel();
+      const homeBtn = document.getElementById('home-theme');
+      if (homeBtn) homeBtn.textContent = themeLabel();
+    }
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (themePref() === 'system') applyTheme();
+    });
+
     // --- show/hide completed preference (per user, localStorage) -------------
     const SHOW_COMPLETED_KEY = 'todo:showCompleted';
     function showCompleted() {
@@ -232,24 +282,26 @@
       try {
         ({ lists } = await api('/api/lists'));
       } catch (e) {
-        app.innerHTML = '<p class="text-red-400 text-sm py-8 text-center">' + esc(e.message) + '</p>';
+        app.innerHTML = '<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">' + esc(e.message) + '</p>';
         return;
       }
       app.innerHTML = `
         <header class="flex items-center justify-between py-3 mb-4">
           <h1 class="text-xl font-bold">My Lists</h1>
           <div class="flex items-center gap-2">
-            <button onclick="openImport('new')" class="text-zinc-400 hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-800">Import</button>
+            <button onclick="cycleTheme()" id="home-theme" title="Toggle theme (system / light / dark)"
+                    class="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800">${themeLabel()}</button>
+            <button onclick="openImport('new')" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800">Import</button>
             <button onclick="newList()" class="bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg">+ New List</button>
           </div>
         </header>
         ${lists.length ? '<div class="space-y-2">' + lists.map(l => `
-          <a href="#/list/${l.id}" class="block bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-xl px-4 py-3">
+          <a href="#/list/${l.id}" class="block bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 rounded-xl px-4 py-3 shadow-sm dark:shadow-none">
             <div class="flex items-center justify-between gap-2">
               <span class="font-medium truncate">${esc(l.name)}</span>
               ${l.is_owner
-                ? '<span class="shrink-0 text-[11px] uppercase tracking-wide text-violet-400 bg-violet-600/15 px-1.5 py-0.5 rounded">Owner</span>'
-                : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-400 bg-zinc-700/40 px-1.5 py-0.5 rounded">Shared</span>'}
+                ? '<span class="shrink-0 text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400 bg-violet-600/10 dark:bg-violet-600/15 px-1.5 py-0.5 rounded">Owner</span>'
+                : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-300/60 dark:bg-zinc-700/40 px-1.5 py-0.5 rounded">Shared</span>'}
             </div>
             <div class="text-xs text-zinc-500 mt-1">
               ${l.open_count} open · ${l.done_count} done
@@ -258,7 +310,7 @@
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16 text-zinc-500">
              <p class="mb-3">No lists yet.</p>
-             <button onclick="newList()" class="text-violet-400 hover:text-violet-300 text-sm font-medium">Create your first list</button>
+             <button onclick="newList()" class="text-violet-600 dark:text-violet-400 hover:text-violet-500 dark:hover:text-violet-300 text-sm font-medium">Create your first list</button>
            </div>`}
       `;
     }
@@ -279,8 +331,8 @@
       try {
         current = await api('/api/lists/' + id);
       } catch (e) {
-        app.innerHTML = `<p class="text-red-400 text-sm py-8 text-center">${esc(e.message)}</p>
-          <p class="text-center"><a href="#/" class="text-violet-400 text-sm">← Back to My Lists</a></p>`;
+        app.innerHTML = `<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">${esc(e.message)}</p>
+          <p class="text-center"><a href="#/" class="text-violet-600 dark:text-violet-400 text-sm">← Back to My Lists</a></p>`;
         return;
       }
       renderList(current);
@@ -307,20 +359,26 @@
       const app = document.getElementById('app');
       app.innerHTML = `
         <header class="flex items-center gap-2 py-3 mb-3 flex-wrap">
-          <a href="#/" class="text-zinc-400 hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
-          <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
-              ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
+          <a href="#/" class="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
+          <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-600 dark:hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
+              ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-400 dark:text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
           <div id="done-toggle" class="flex items-center gap-2 shrink-0"></div>
-          <button onclick="openExport()" title="Export markdown"
-                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-200" aria-label="Export markdown">⤓</button>
-          <button onclick="openImport('merge')" title="Import markdown into this list"
-                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-200" aria-label="Import markdown">⤒</button>
           <button onclick="openMembers()" title="Members"
-                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-300">
+                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300">
             👥 ${1 + d.members.length}
           </button>
-          ${isOwner ? `<button onclick="deleteList()" title="Delete list"
-                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-600 hover:text-red-400">🗑</button>` : ''}
+          <div id="drawer-wrap" class="relative shrink-0">
+            <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu"
+                    class="text-base leading-none px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">⋯</button>
+            <div id="drawer" class="hidden absolute right-0 top-full mt-1 w-56 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xl z-30 py-1.5">
+              <button onclick="closeDrawer(); openExport()" class="${DRAWER_ITEM}">⤓&nbsp; Export markdown</button>
+              <button onclick="closeDrawer(); openImport('merge')" class="${DRAWER_ITEM}">⤒&nbsp; Import markdown</button>
+              <button onclick="cycleTheme()" id="theme-btn" class="${DRAWER_ITEM}">Theme: ${themeLabel()}</button>
+              ${isOwner ? `
+              <div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+              <button onclick="closeDrawer(); deleteList()" class="${DRAWER_ITEM} !text-red-500 dark:!text-red-400">✕&nbsp; Delete list</button>` : ''}
+            </div>
+          </div>
         </header>
 
         <div id="cats" class="space-y-7">
@@ -328,9 +386,9 @@
         </div>
 
         <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
-          <span class="text-zinc-600 text-sm select-none">+</span>
+          <span class="text-zinc-400 dark:text-zinc-600 text-sm select-none">+</span>
           <input name="name" placeholder="New category…" autocomplete="off"
-                 class="flex-1 bg-transparent text-sm placeholder-zinc-600 text-zinc-300 focus:outline-none py-1.5">
+                 class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
         </form>
       `;
       renderToggle();
@@ -342,12 +400,27 @@
       if (!el) return;
       const show = showCompleted();
       el.innerHTML = `
-        <span class="text-xs text-zinc-400 select-none cursor-pointer" onclick="setShowCompleted(${!show})">Show done</span>
+        <span class="text-xs text-zinc-500 dark:text-zinc-400 select-none cursor-pointer" onclick="setShowCompleted(${!show})">Show done</span>
         <button role="switch" aria-checked="${show}" onclick="setShowCompleted(${!show})" title="${show ? 'Hide' : 'Show'} completed items"
-                class="relative w-9 h-[22px] rounded-full transition-colors duration-150 ${show ? 'bg-violet-600' : 'bg-zinc-700'}">
+                class="relative w-9 h-[22px] rounded-full transition-colors duration-150 ${show ? 'bg-violet-600' : 'bg-zinc-300 dark:bg-zinc-700'}">
           <span class="absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white shadow transition-transform duration-150 ${show ? 'translate-x-[14px]' : ''}"></span>
         </button>`;
     }
+
+    // --- drawer ------------------------------------------------------------------
+    function toggleDrawer(ev) {
+      ev.stopPropagation();
+      const d = document.getElementById('drawer');
+      if (d) d.classList.toggle('hidden');
+    }
+    function closeDrawer() {
+      const d = document.getElementById('drawer');
+      if (d) d.classList.add('hidden');
+    }
+    document.addEventListener('click', e => {
+      const d = document.getElementById('drawer');
+      if (d && !d.classList.contains('hidden') && !e.target.closest('#drawer-wrap')) closeDrawer();
+    });
 
     function renderCategory(c) {
       const show = showCompleted();
@@ -356,43 +429,41 @@
       const empty = !unchecked.length && !checked.length;
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
-          <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-800/60">
-            <span class="drag-handle text-zinc-700 hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-            <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-200"
-                onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-500 normal-case">✎</span></h2>
-            ${c.is_default
-              ? '<span class="text-[10px] text-zinc-600 uppercase">default</span>'
-              : `<button onclick="deleteCategory(${c.id})" title="Delete category"
-                   class="cat-del text-zinc-600 hover:text-red-400 text-sm px-1">🗑</button>`}
+          <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-300/80 dark:border-zinc-800/60">
+            <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
+            <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-400 dark:text-zinc-500 normal-case">✎</span></h2>
+            <button onclick="deleteCategory(${c.id})" title="Delete category"
+                    class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
           </div>
           <div class="space-y-0.5">
             ${unchecked.map(renderItem).join('')}
             ${show
               ? checked.map(renderItem).join('')
-              : (checked.length ? `<p class="text-xs text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '')}
-            ${empty ? '<p class="text-xs text-zinc-600 px-1 py-1">No items yet</p>' : ''}
+              : (checked.length ? `<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '')}
+            ${empty ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           <form onsubmit="return addItem(event, ${c.id})" class="mt-0.5 flex items-center gap-2 px-1">
-            <span class="text-zinc-600 text-sm w-4 text-center select-none">+</span>
+            <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
             <input name="text" placeholder="Add an item…" autocomplete="off"
-                   class="flex-1 bg-transparent text-sm placeholder-zinc-600 text-zinc-300 focus:outline-none py-1.5">
+                   class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
           </form>
         </section>`;
     }
 
     function renderItem(i) {
       return `
-        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-zinc-800/40"
+        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
              data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true">
-          <span class="drag-handle text-zinc-700 hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
+          <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
           <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
                  class="w-4 h-4 shrink-0 rounded accent-violet-600 cursor-pointer">
-          <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-500' : ''}">${esc(i.text)}</span>
-          ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
+          <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
+          ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
           <button onclick="editItem(${i.id})" title="Edit"
-                  class="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-200 text-xs px-1">✎</button>
+                  class="opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
           <button onclick="deleteItem(${i.id})" title="Delete"
-                  class="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 text-xs px-1">🗑</button>
+                  class="opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
         </div>`;
     }
 
@@ -455,28 +526,22 @@
       } catch (e) { toast(e.message); }
     }
 
+    // Any category can be deleted (with its items) except the last one.
     async function deleteCategory(id) {
-      const cat = current.categories.find(c => c.id === id);
-      const def = current.categories.find(c => c.is_default);
-      const itemCount = current.items.filter(i => i.category_id === id).length;
-      let choice = 'move';
-      if (itemCount) {
-        choice = await openDialog({
-          title: 'Delete category "' + (cat ? cat.name : '') + '"? It has ' + itemCount + ' item' + (itemCount > 1 ? 's' : '') + '.',
-          choices: [
-            { label: 'Move items to ' + (def ? def.name : 'default'), value: 'move' },
-            { label: 'Delete all items too', value: 'delete', danger: true },
-          ],
-        });
-      } else {
-        choice = (await askConfirm('Delete empty category "' + (cat ? cat.name : '') + '"?')) ? 'move' : null;
+      if (current.categories.length <= 1) {
+        return toast("Can't delete the only category — lists need at least one");
       }
-      if (!choice) return;
+      const cat = current.categories.find(c => c.id === id);
+      const n = current.items.filter(i => i.category_id === id).length;
+      const msg = 'Delete category "' + (cat ? cat.name : '') + '"' +
+        (n ? ' and its ' + n + ' item' + (n > 1 ? 's' : '') : '') + '?';
+      if (!await askConfirm(msg)) return;
       try {
-        await api('/api/categories/' + id + (choice === 'delete' ? '?deleteItems=1' : ''), { method: 'DELETE' });
-        // Items either moved to the default category (new sort_orders assigned
-        // server-side) or were deleted — refetch silently to stay in sync.
-        refreshList();
+        await api('/api/categories/' + id, { method: 'DELETE' });
+        current.categories = current.categories.filter(c => c.id !== id);
+        current.items = current.items.filter(i => i.category_id !== id);
+        const el = document.getElementById('cat-' + id);
+        if (el) el.remove();
       } catch (e) { toast(e.message); }
     }
 
@@ -530,7 +595,7 @@
     // Rows and category sections are draggable, but a drag only starts from the
     // ⠿ handle (checked via mousedown) so text selection and taps still work.
     let drag = null;     // { type: 'item'|'cat', id, catId?, checked? }
-    let dropCue = null;  // { id, after }
+    let dropCue = null;  // items: { catId, id?, after?, end? } · cats: { id, after }
     let handleArmed = false;
 
     document.addEventListener('mousedown', e => { handleArmed = !!e.target.closest('.drag-handle'); });
@@ -757,7 +822,7 @@
         text: buildMarkdown(),
         readonly: true,
         actionsHtml: `
-          <button onclick="copyMd()" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Copy</button>
+          <button onclick="copyMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Copy</button>
           <button onclick="downloadMd()" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Download .md</button>`,
       });
     }
@@ -795,7 +860,7 @@
         text: '',
         readonly: false,
         actionsHtml: `
-          <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>
+          <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
           <button onclick="runImport('${mode}')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import</button>`,
       });
     }
@@ -844,25 +909,25 @@
       const body = document.getElementById('members-body');
       body.innerHTML = `
         <div class="space-y-1.5 mb-4">
-          <div class="flex items-center justify-between px-2 py-1.5 rounded-lg bg-zinc-800/50">
+          <div class="flex items-center justify-between px-2 py-1.5 rounded-lg bg-zinc-200/60 dark:bg-zinc-800/50">
             <span class="text-sm">@${esc(current.list.owner_username)}</span>
-            <span class="text-[11px] uppercase tracking-wide text-violet-400">Owner</span>
+            <span class="text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400">Owner</span>
           </div>
           ${current.members.map(m => `
-            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-800/50">
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50">
               <span class="text-sm">@${esc(m.username)}</span>
-              ${isOwner ? `<button onclick="removeMember(${m.id})" class="text-zinc-500 hover:text-red-400 text-xs">Remove</button>` : ''}
+              ${isOwner ? `<button onclick="removeMember(${m.id})" class="text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs">Remove</button>` : ''}
             </div>`).join('')}
-          ${!current.members.length ? '<p class="text-xs text-zinc-600 px-2 py-1">No members yet</p>' : ''}
+          ${!current.members.length ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-2 py-1">No members yet</p>' : ''}
         </div>
         ${isOwner ? `
           <form onsubmit="return inviteMember(event)" class="flex gap-2">
             <input name="username" placeholder="Invite by username…" autocomplete="off"
-                   class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+                   class="flex-1 bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600">
             <button class="text-sm px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Invite</button>
           </form>
-          <p class="text-[11px] text-zinc-600 mt-2">Invites take effect immediately — the user will see this list next time they open the app.</p>`
-        : '<p class="text-xs text-zinc-600">Only the owner can manage members.</p>'}
+          <p class="text-[11px] text-zinc-400 dark:text-zinc-600 mt-2">Invites take effect immediately — the user will see this list next time they open the app.</p>`
+        : '<p class="text-xs text-zinc-400 dark:text-zinc-600">Only the owner can manage members.</p>'}
       `;
     }
 
@@ -890,6 +955,7 @@
       } catch (e) { toast(e.message); }
     }
 
+    applyTheme();
     route();
   </script>
 </body>
