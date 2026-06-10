@@ -479,7 +479,7 @@ app.post('/api/categories/:id/items', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO items (category_id, text, checked, sort_order, created_by)
        VALUES ($1, $2, FALSE,
-               COALESCE((SELECT MAX(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 0) + 1,
+               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
                $3)
        RETURNING *`,
       [category.id, text, req.user.username]

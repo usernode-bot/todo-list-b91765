@@ -85,10 +85,17 @@
     .cat-head:hover .cat-del { opacity: 1; }
     .drag-handle { cursor: grab; touch-action: none; }
     .drag-handle:active { cursor: grabbing; }
-    /* iOS-style swipe-to-reveal actions (mobile). The front layer slides left
-       over absolutely-positioned action buttons. */
+    /* iOS-style swipe-to-reveal actions (mobile). The front layer and the
+       action buttons translate together: the buttons ride in from the right
+       edge with the gesture and ride back out when it closes. */
     .swipe-wrap { touch-action: pan-y; }
     .swipe-front { position: relative; transition: transform .18s ease-out; }
+    .swipe-actions { transform: translateX(100%); transition: transform .18s ease-out; }
+    /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
+    .item-row, .cat-head {
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none;
+    }
     /* Touch devices: no drag handles (long-press drags instead) and no
        hover-revealed buttons (swipe left reveals rename/delete instead). */
     @media (hover: none) and (pointer: coarse) {
@@ -497,7 +504,7 @@
       const empty = !unchecked.length && !checked.length;
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
-        <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
+        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section">
           <div class="swipe-wrap relative overflow-hidden mb-1">
             <div class="swipe-actions absolute inset-y-0 right-0 flex">
               <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
@@ -505,8 +512,8 @@
             </div>
             <div class="swipe-front cat-head flex items-center gap-1.5 pb-1.5 border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-              <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
-                  onclick="catTitleTap(event, ${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-400 dark:text-zinc-500 normal-case">✎</span></h2>
+              <h2 class="font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                  onclick="catTitleTap(event, ${c.id})" title="Rename category">${esc(c.name)}</h2>
               <button onclick="toggleAdder(${c.id})" title="Add an item"
                       class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
               <button onclick="deleteCategory(${c.id})" title="Delete category"
@@ -520,9 +527,9 @@
                    onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})"
                    class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
           </form>` : ''}
-          <div class="space-y-0.5">
+          <div class="active-items space-y-0.5">
             ${unchecked.map(renderItem).join('')}
-            ${empty ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
+            ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           ${checked.length ? `
           <div class="flex items-center justify-start gap-2 my-1.5 px-1">
@@ -566,7 +573,7 @@
             <button onclick="deleteItem(${i.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
           </div>
           <div class="swipe-front item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
-               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true"
+               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH ? 'false' : 'true'}"
                onclick="rowTap(event, ${i.id})">
             <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
             <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
@@ -673,10 +680,24 @@
       try {
         const pre = isCatFullyDone(categoryId);
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
-        current.items.push(item);
-        repaintSmart([categoryId], [pre]);
-        const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
-        if (next) next.focus();
+        current.items.push(item); // server gives it the smallest sort_order → top of the active list
+        if (isCatFullyDone(categoryId) !== pre) {
+          // Category left the fully-done group — full re-render, then put the
+          // caret back without scrolling (avoids the keyboard/scroll bounce).
+          repaintAllCategories();
+          const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+          if (next) next.focus({ preventScroll: true });
+        } else {
+          // Insert just the new row; the form (and its focus) is untouched,
+          // so the view stays perfectly still.
+          const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+          if (body) {
+            const ph = body.querySelector('.empty-note');
+            if (ph) ph.remove();
+            body.insertAdjacentHTML('afterbegin', renderItem(item));
+          }
+          input.value = '';
+        }
       } catch (e) { toast(e.message); }
       return false;
     }
@@ -751,21 +772,22 @@
     // position is a valid drop target. Row cues paint on the swipe wrapper —
     // the row itself sits inside overflow-hidden, which clips box-shadows.
     function cueFromPoint(targetEl, clientY) {
-      clearDropCue();
-      if (!drag || !targetEl || !targetEl.closest) return false;
+      if (!drag || !targetEl || !targetEl.closest) { clearDropCue(); return false; }
       if (drag.type === 'item') {
         // Over a row of the same checked-state (any category): insert
         // before/after it. Elsewhere in a category section: append to the
-        // end of that category's matching section.
+        // end of that category's matching section. Over the dragged row
+        // itself: keep the last cue so a drop there still lands somewhere.
         const row = targetEl.closest('.item-row');
-        if (row && (row.dataset.checked === '1') === drag.checked && +row.dataset.item !== drag.id) {
+        if (row && +row.dataset.item === drag.id) return true;
+        clearDropCue();
+        if (row && (row.dataset.checked === '1') === drag.checked) {
           const r = row.getBoundingClientRect();
           const after = clientY > r.top + r.height / 2;
           (row.closest('.swipe-wrap') || row).classList.add(after ? 'drop-after' : 'drop-before');
           dropCue = { catId: +row.dataset.cat, id: +row.dataset.item, after };
           return true;
         }
-        if (row && +row.dataset.item === drag.id) return true; // hovering itself
         const sec = targetEl.closest('.cat-section');
         if (!sec) return false;
         sec.classList.add('drop-into');
@@ -773,8 +795,11 @@
         return true;
       } else {
         const sec = targetEl.closest('.cat-section');
-        if (!sec) return false;
+        if (!sec) { clearDropCue(); return false; }
+        // Over the dragged section itself (it's tall — this is the common
+        // case mid-drag): keep the last cue instead of wiping it.
         if (+sec.dataset.cat === drag.id) return true;
+        clearDropCue();
         const r = sec.getBoundingClientRect();
         const after = clientY > r.top + r.height / 2;
         sec.classList.add(after ? 'drop-after' : 'drop-before');
@@ -820,10 +845,25 @@
     let touchDragging = false;
     let suppressTap = false;
 
+    // Positions the front layer and the action buttons as one unit: at
+    // offset 0 the actions sit just past the right edge (CSS default
+    // translateX(100%)); at -SWIPE_W they're fully revealed.
+    function setSwipeOffset(wrap, off, animate) {
+      const front = wrap.querySelector('.swipe-front');
+      const actions = wrap.querySelector('.swipe-actions');
+      const t = animate ? '' : 'none';
+      if (front) {
+        front.style.transition = t;
+        front.style.transform = off ? 'translateX(' + off + 'px)' : '';
+      }
+      if (actions) {
+        actions.style.transition = t;
+        actions.style.transform = off ? 'translateX(' + (SWIPE_W + off) + 'px)' : '';
+      }
+    }
     function closeOpenSwipe() {
       if (!openSwipe) return;
-      const front = openSwipe.querySelector('.swipe-front');
-      if (front) front.style.transform = '';
+      setSwipeOffset(openSwipe, 0, true);
       openSwipe = null;
     }
     function suppressNextTap() {
@@ -837,7 +877,6 @@
       const wrap = e.target.closest && e.target.closest('.swipe-wrap');
       swipe = wrap ? {
         wrap,
-        front: wrap.querySelector('.swipe-front'),
         startX: t.clientX, startY: t.clientY, dx: 0, mode: null,
         wasOpen: wrap === openSwipe,
       } : null;
@@ -886,12 +925,11 @@
           clearTimeout(lpTimer); // moved too much for a long-press
         }
       }
-      if (swipe.mode === 'h' && swipe.front) {
+      if (swipe.mode === 'h') {
         e.preventDefault();
         const base = swipe.wasOpen ? -SWIPE_W : 0;
         swipe.dx = Math.max(-SWIPE_W, Math.min(0, base + dx));
-        swipe.front.style.transition = 'none';
-        swipe.front.style.transform = 'translateX(' + swipe.dx + 'px)';
+        setSwipeOffset(swipe.wrap, swipe.dx, false);
       }
     }, { passive: false });
 
@@ -908,14 +946,13 @@
         swipe = null;
         return;
       }
-      if (swipe && swipe.mode === 'h' && swipe.front) {
-        swipe.front.style.transition = '';
+      if (swipe && swipe.mode === 'h') {
         if (openSwipe && openSwipe !== swipe.wrap) closeOpenSwipe();
         if (swipe.dx < -SWIPE_W / 2) {
-          swipe.front.style.transform = 'translateX(' + (-SWIPE_W) + 'px)';
+          setSwipeOffset(swipe.wrap, -SWIPE_W, true);
           openSwipe = swipe.wrap;
         } else {
-          swipe.front.style.transform = '';
+          setSwipeOffset(swipe.wrap, 0, true);
           if (openSwipe === swipe.wrap) openSwipe = null;
         }
         suppressNextTap();
@@ -931,10 +968,7 @@
         drag = null;
         clearDropCue();
       }
-      if (swipe && swipe.front) {
-        swipe.front.style.transition = '';
-        swipe.front.style.transform = swipe.wasOpen ? 'translateX(' + (-SWIPE_W) + 'px)' : '';
-      }
+      if (swipe) setSwipeOffset(swipe.wrap, swipe.wasOpen ? -SWIPE_W : 0, true);
       swipe = null;
     }, { passive: true });
 
