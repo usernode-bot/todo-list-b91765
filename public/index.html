@@ -66,6 +66,15 @@
   <title>Todo List</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
+  <style>
+    .cat-name .pencil { opacity: 0; transition: opacity .12s; }
+    .cat-name:hover .pencil { opacity: 1; }
+    .drag-handle { cursor: grab; touch-action: none; }
+    .drag-handle:active { cursor: grabbing; }
+    .drop-before { box-shadow: 0 -2px 0 0 #8b5cf6; }
+    .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
+    .dragging { opacity: 0.4; }
+  </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
@@ -82,16 +91,13 @@
     </div>
   </div>
 
-  <!-- Prompt/confirm dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
+  <!-- Prompt/confirm/choice dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
   <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
     <form id="dialog-form" class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
       <p id="dialog-title" class="text-sm text-zinc-300 mb-3"></p>
       <input id="dialog-input" autocomplete="off"
              class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600 mb-4">
-      <div class="flex justify-end gap-2">
-        <button type="button" id="dialog-cancel" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>
-        <button type="submit" id="dialog-ok" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">OK</button>
-      </div>
+      <div id="dialog-buttons" class="flex justify-end gap-2 flex-wrap"></div>
     </form>
   </div>
 
@@ -122,39 +128,55 @@
       toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
     }
 
-    // Promise-based replacements for prompt()/confirm().
+    // Promise-based replacements for prompt()/confirm(), plus a multi-choice
+    // mode used by "delete category".
     let dialogResolve = null;
+    let dialogChoices = null;
     const dialogEl = document.getElementById('dialog');
     const dialogForm = document.getElementById('dialog-form');
     const dialogInput = document.getElementById('dialog-input');
 
-    function openDialog({ title, withInput, value = '', okLabel = 'OK', danger = false }) {
+    function openDialog({ title, withInput = false, value = '', choices = null, okLabel = 'OK' }) {
       return new Promise(resolve => {
         dialogResolve = resolve;
+        dialogChoices = choices;
         document.getElementById('dialog-title').textContent = title;
         dialogInput.classList.toggle('hidden', !withInput);
         dialogInput.value = value;
-        const ok = document.getElementById('dialog-ok');
-        ok.textContent = okLabel;
-        ok.className = 'text-sm px-3 py-1.5 rounded-lg text-white ' +
-          (danger ? 'bg-red-600 hover:bg-red-500' : 'bg-violet-600 hover:bg-violet-500');
+        const btns = document.getElementById('dialog-buttons');
+        let html = '<button type="button" data-dlg="cancel" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>';
+        if (choices) {
+          html += choices.map((c, i) =>
+            `<button type="button" data-dlg="${i}" class="text-sm px-3 py-1.5 rounded-lg text-white ${c.danger ? 'bg-red-600 hover:bg-red-500' : 'bg-violet-600 hover:bg-violet-500'}">${esc(c.label)}</button>`
+          ).join('');
+        } else {
+          html += `<button type="submit" class="text-sm px-3 py-1.5 rounded-lg text-white bg-violet-600 hover:bg-violet-500">${esc(okLabel)}</button>`;
+        }
+        btns.innerHTML = html;
         dialogEl.classList.remove('hidden');
         if (withInput) setTimeout(() => { dialogInput.focus(); dialogInput.select(); }, 0);
       });
     }
     function settleDialog(result) {
       dialogEl.classList.add('hidden');
-      if (dialogResolve) { dialogResolve(result); dialogResolve = null; }
+      if (dialogResolve) { dialogResolve(result); dialogResolve = null; dialogChoices = null; }
     }
     dialogForm.addEventListener('submit', ev => {
       ev.preventDefault();
+      if (dialogChoices) return; // choice dialogs settle via their buttons
       settleDialog(dialogInput.classList.contains('hidden') ? true : dialogInput.value);
     });
-    document.getElementById('dialog-cancel').addEventListener('click', () => settleDialog(null));
+    document.getElementById('dialog-buttons').addEventListener('click', ev => {
+      const btn = ev.target.closest('[data-dlg]');
+      if (!btn) return;
+      if (btn.dataset.dlg === 'cancel') return settleDialog(null);
+      if (dialogChoices) settleDialog(dialogChoices[+btn.dataset.dlg].value);
+    });
     dialogEl.addEventListener('click', ev => { if (ev.target === dialogEl) settleDialog(null); });
 
     const askText = (title, value) => openDialog({ title, withInput: true, value });
-    const askConfirm = (title, okLabel = 'Delete') => openDialog({ title, withInput: false, okLabel, danger: true });
+    const askConfirm = (title, okLabel = 'Delete') =>
+      openDialog({ title, choices: [{ label: okLabel, value: true, danger: true }] });
 
     function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, c =>
@@ -166,9 +188,12 @@
     function showCompleted() {
       return localStorage.getItem(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
     }
-    function toggleShowCompleted() {
-      localStorage.setItem(SHOW_COMPLETED_KEY, showCompleted() ? 'false' : 'true');
-      if (current) renderList(current);
+    function setShowCompleted(v) {
+      localStorage.setItem(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
+      if (current) {
+        renderToggle();
+        repaintAllCategories();
+      }
     }
 
     // --- routing --------------------------------------------------------------
@@ -241,66 +266,91 @@
       renderList(current);
     }
 
+    // Silent refetch + single repaint — no "Loading…" wipe, so no flash.
+    async function refreshList() {
+      if (!current) return;
+      try {
+        current = await api('/api/lists/' + current.list.id);
+        renderList(current);
+      } catch (e) { toast(e.message); }
+    }
+
+    // Items of one section (unchecked or checked) of a category, in order.
+    function sectionItems(catId, checked) {
+      return current.items
+        .filter(i => i.category_id === catId && !!i.checked === checked)
+        .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
+    }
+
     function renderList(d) {
       const isOwner = d.role === 'owner';
-      const show = showCompleted();
       const app = document.getElementById('app');
-
-      const itemsByCat = {};
-      for (const it of d.items) (itemsByCat[it.category_id] = itemsByCat[it.category_id] || []).push(it);
-
       app.innerHTML = `
-        <header class="flex items-center gap-2 py-3 mb-2">
+        <header class="flex items-center gap-2 py-3 mb-3">
           <a href="#/" class="text-zinc-400 hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
           <h1 class="text-xl font-bold flex-1 truncate ${isOwner ? 'cursor-pointer hover:text-violet-300' : ''}"
               ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
-          <button onclick="toggleShowCompleted()" title="${show ? 'Hide' : 'Show'} completed items"
-                  class="text-xs px-2.5 py-1.5 rounded-lg border ${show ? 'border-zinc-700 text-zinc-300 bg-zinc-900' : 'border-violet-600/50 text-violet-300 bg-violet-600/10'}">
-            ${show ? '👁 Hide done' : '👁 Show done'}
-          </button>
+          <div id="done-toggle" class="flex rounded-lg border border-zinc-800 overflow-hidden text-xs shrink-0"></div>
           <button onclick="openMembers()" title="Members"
-                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-700 text-zinc-300 bg-zinc-900">
+                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-300">
             👥 ${1 + d.members.length}
           </button>
           ${isOwner ? `<button onclick="deleteList()" title="Delete list"
-                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-500 hover:text-red-400 hover:border-red-900">🗑</button>` : ''}
+                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-600 hover:text-red-400">🗑</button>` : ''}
         </header>
 
-        <div class="space-y-5">
-          ${d.categories.map(c => renderCategory(c, itemsByCat[c.id] || [], show)).join('')}
+        <div id="cats" class="space-y-7">
+          ${d.categories.map(c => renderCategory(c)).join('')}
         </div>
 
-        <form onsubmit="return addCategory(event)" class="mt-6 flex gap-2">
+        <form onsubmit="return addCategory(event)" class="mt-8 flex gap-2">
           <input name="name" placeholder="New category…" autocomplete="off"
-                 class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+                 class="flex-1 bg-zinc-900/50 border border-zinc-800/70 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
           <button class="text-sm px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Add</button>
         </form>
       `;
+      renderToggle();
     }
 
-    function renderCategory(c, items, show) {
-      const unchecked = items.filter(i => !i.checked);
-      const checked = items.filter(i => i.checked);
-      const hiddenNote = (!show && checked.length)
-        ? `<p class="text-xs text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '';
+    // Segmented show/hide-completed control: both options visible, active one
+    // highlighted.
+    function renderToggle() {
+      const el = document.getElementById('done-toggle');
+      if (!el) return;
+      const show = showCompleted();
+      const on = 'px-2.5 py-1.5 bg-violet-600/25 text-violet-200 font-medium';
+      const off = 'px-2.5 py-1.5 bg-zinc-900 text-zinc-500 hover:text-zinc-300';
+      el.innerHTML = `
+        <button onclick="setShowCompleted(true)" class="${show ? on : off}">Show done</button>
+        <button onclick="setShowCompleted(false)" class="border-l border-zinc-800 ${show ? off : on}">Hide done</button>`;
+    }
+
+    function renderCategory(c) {
+      const show = showCompleted();
+      const unchecked = sectionItems(c.id, false);
+      const checked = sectionItems(c.id, true);
+      const empty = !unchecked.length && !checked.length;
       return `
-        <section class="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3">
-          <div class="flex items-center gap-2 mb-2">
-            <h2 class="font-semibold text-sm uppercase tracking-wide text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-200"
-                onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)}</h2>
+        <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
+          <div class="flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-800/60">
+            <span class="drag-handle text-zinc-700 hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
+            <h2 class="cat-name font-semibold text-sm uppercase tracking-wide text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-200"
+                onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-500 normal-case">✎</span></h2>
             ${c.is_default
               ? '<span class="text-[10px] text-zinc-600 uppercase">default</span>'
-              : `<button onclick="deleteCategory(${c.id})" title="Delete category (items move to default)"
+              : `<button onclick="deleteCategory(${c.id})" title="Delete category"
                    class="text-zinc-600 hover:text-red-400 text-sm px-1">🗑</button>`}
           </div>
-          <div class="space-y-1">
+          <div class="space-y-0.5">
             ${unchecked.map(renderItem).join('')}
-            ${show ? checked.map(renderItem).join('') : hiddenNote}
-            ${!items.length ? '<p class="text-xs text-zinc-600 px-1 py-1">No items yet</p>' : ''}
+            ${show
+              ? checked.map(renderItem).join('')
+              : (checked.length ? `<p class="text-xs text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '')}
+            ${empty ? '<p class="text-xs text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
-          <form onsubmit="return addItem(event, ${c.id})" class="mt-2 flex gap-2">
+          <form onsubmit="return addItem(event, ${c.id})" class="mt-1.5 flex gap-2">
             <input name="text" placeholder="Add an item…" autocomplete="off"
-                   class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+                   class="flex-1 bg-zinc-900/50 border border-zinc-800/70 rounded-lg px-3 py-1.5 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
             <button class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">+</button>
           </form>
         </section>`;
@@ -308,15 +358,31 @@
 
     function renderItem(i) {
       return `
-        <div class="group flex items-center gap-2.5 px-1.5 py-1.5 rounded-lg hover:bg-zinc-800/50">
+        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-zinc-800/40"
+             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true">
+          <span class="drag-handle text-zinc-700 hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
           <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
                  class="w-4 h-4 shrink-0 rounded accent-violet-600 cursor-pointer">
           <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-500' : ''}">${esc(i.text)}</span>
+          ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
           <button onclick="editItem(${i.id})" title="Edit"
                   class="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-200 text-xs px-1">✎</button>
           <button onclick="deleteItem(${i.id})" title="Delete"
                   class="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 text-xs px-1">🗑</button>
         </div>`;
+    }
+
+    // Targeted repaints — swap just the affected category section so the rest
+    // of the screen (and input focus elsewhere) is untouched.
+    function repaintCategory(catId) {
+      const c = current.categories.find(x => x.id === catId);
+      const el = document.getElementById('cat-' + catId);
+      if (!c || !el) return;
+      el.outerHTML = renderCategory(c);
+    }
+    function repaintAllCategories() {
+      const el = document.getElementById('cats');
+      if (el) el.innerHTML = current.categories.map(c => renderCategory(c)).join('');
     }
 
     // --- list actions ------------------------------------------------------------
@@ -325,7 +391,8 @@
       if (!name || !name.trim() || name.trim() === current.list.name) return;
       try {
         await api('/api/lists/' + current.list.id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
-        loadList(current.list.id);
+        current.list.name = name.trim();
+        renderList(current);
       } catch (e) { toast(e.message); }
     }
 
@@ -344,8 +411,11 @@
       const name = input.value.trim();
       if (!name) return false;
       try {
-        await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
-        loadList(current.list.id);
+        const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
+        current.categories.push(category);
+        document.getElementById('cats').insertAdjacentHTML('beforeend', renderCategory(category));
+        input.value = '';
+        input.focus();
       } catch (e) { toast(e.message); }
       return false;
     }
@@ -356,16 +426,33 @@
       if (!name || !name.trim()) return;
       try {
         await api('/api/categories/' + id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
-        loadList(current.list.id);
+        cat.name = name.trim();
+        repaintCategory(id);
       } catch (e) { toast(e.message); }
     }
 
     async function deleteCategory(id) {
       const cat = current.categories.find(c => c.id === id);
-      if (!await askConfirm('Delete category "' + (cat ? cat.name : '') + '"? Its items will move to the default category.', 'Delete')) return;
+      const def = current.categories.find(c => c.is_default);
+      const itemCount = current.items.filter(i => i.category_id === id).length;
+      let choice = 'move';
+      if (itemCount) {
+        choice = await openDialog({
+          title: 'Delete category "' + (cat ? cat.name : '') + '"? It has ' + itemCount + ' item' + (itemCount > 1 ? 's' : '') + '.',
+          choices: [
+            { label: 'Move items to ' + (def ? def.name : 'default'), value: 'move' },
+            { label: 'Delete all items too', value: 'delete', danger: true },
+          ],
+        });
+      } else {
+        choice = (await askConfirm('Delete empty category "' + (cat ? cat.name : '') + '"?')) ? 'move' : null;
+      }
+      if (!choice) return;
       try {
-        await api('/api/categories/' + id, { method: 'DELETE' });
-        loadList(current.list.id);
+        await api('/api/categories/' + id + (choice === 'delete' ? '?deleteItems=1' : ''), { method: 'DELETE' });
+        // Items either moved to the default category (new sort_orders assigned
+        // server-side) or were deleted — refetch silently to stay in sync.
+        refreshList();
       } catch (e) { toast(e.message); }
     }
 
@@ -376,17 +463,22 @@
       const text = input.value.trim();
       if (!text) return false;
       try {
-        await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
-        loadList(current.list.id);
+        const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
+        current.items.push(item);
+        repaintCategory(categoryId);
+        const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+        if (next) next.focus();
       } catch (e) { toast(e.message); }
       return false;
     }
 
     async function toggleItem(id, checked) {
       try {
-        await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
-        loadList(current.list.id);
-      } catch (e) { toast(e.message); loadList(current.list.id); }
+        const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
+        const idx = current.items.findIndex(i => i.id === id);
+        if (idx !== -1) current.items[idx] = item;
+        repaintCategory(item.category_id);
+      } catch (e) { toast(e.message); refreshList(); }
     }
 
     async function editItem(id) {
@@ -394,16 +486,131 @@
       const text = await askText('Edit item:', item ? item.text : '');
       if (!text || !text.trim()) return;
       try {
-        await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ text: text.trim() }) });
-        loadList(current.list.id);
+        const { item: updated } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ text: text.trim() }) });
+        const idx = current.items.findIndex(i => i.id === id);
+        if (idx !== -1) current.items[idx] = updated;
+        repaintCategory(updated.category_id);
       } catch (e) { toast(e.message); }
     }
 
     async function deleteItem(id) {
+      const item = current.items.find(i => i.id === id);
       try {
         await api('/api/items/' + id, { method: 'DELETE' });
-        loadList(current.list.id);
+        current.items = current.items.filter(i => i.id !== id);
+        if (item) repaintCategory(item.category_id);
       } catch (e) { toast(e.message); }
+    }
+
+    // --- drag & drop reordering -------------------------------------------------
+    // Rows and category sections are draggable, but a drag only starts from the
+    // ⠿ handle (checked via mousedown) so text selection and taps still work.
+    let drag = null;     // { type: 'item'|'cat', id, catId?, checked? }
+    let dropCue = null;  // { id, after }
+    let handleArmed = false;
+
+    document.addEventListener('mousedown', e => { handleArmed = !!e.target.closest('.drag-handle'); });
+
+    const appEl = document.getElementById('app');
+
+    appEl.addEventListener('dragstart', e => {
+      if (!handleArmed || !current) { e.preventDefault(); return; }
+      const row = e.target.closest && e.target.closest('.item-row');
+      const sec = e.target.closest && e.target.closest('.cat-section');
+      if (row) {
+        drag = { type: 'item', id: +row.dataset.item, catId: +row.dataset.cat, checked: row.dataset.checked === '1' };
+        row.classList.add('dragging');
+      } else if (sec) {
+        drag = { type: 'cat', id: +sec.dataset.cat };
+        sec.classList.add('dragging');
+      } else { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', ''); } catch (_) {}
+    });
+
+    function clearDropCue() {
+      document.querySelectorAll('.drop-before, .drop-after').forEach(el =>
+        el.classList.remove('drop-before', 'drop-after'));
+      dropCue = null;
+    }
+
+    appEl.addEventListener('dragover', e => {
+      if (!drag) return;
+      clearDropCue();
+      if (drag.type === 'item') {
+        const row = e.target.closest && e.target.closest('.item-row');
+        if (!row || +row.dataset.cat !== drag.catId) return;
+        if ((row.dataset.checked === '1') !== drag.checked) return;
+        if (+row.dataset.item === drag.id) { e.preventDefault(); return; }
+        e.preventDefault();
+        const r = row.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        row.classList.add(after ? 'drop-after' : 'drop-before');
+        dropCue = { id: +row.dataset.item, after };
+      } else {
+        const sec = e.target.closest && e.target.closest('.cat-section');
+        if (!sec) return;
+        if (+sec.dataset.cat === drag.id) { e.preventDefault(); return; }
+        e.preventDefault();
+        const r = sec.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        sec.classList.add(after ? 'drop-after' : 'drop-before');
+        dropCue = { id: +sec.dataset.cat, after };
+      }
+    });
+
+    appEl.addEventListener('drop', e => {
+      if (!drag) return;
+      e.preventDefault();
+      const d = drag, cue = dropCue;
+      drag = null;
+      clearDropCue();
+      if (!cue) return;
+      if (d.type === 'item') applyItemReorder(d, cue);
+      else applyCategoryReorder(d, cue);
+    });
+
+    appEl.addEventListener('dragend', () => {
+      document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+      drag = null;
+      handleArmed = false;
+      clearDropCue();
+    });
+
+    async function applyItemReorder(d, cue) {
+      const ids = sectionItems(d.catId, d.checked).map(i => i.id);
+      const from = ids.indexOf(d.id);
+      if (from === -1) return;
+      ids.splice(from, 1);
+      let to = ids.indexOf(cue.id);
+      if (to === -1) return;
+      if (cue.after) to++;
+      ids.splice(to, 0, d.id);
+      ids.forEach((id, idx) => {
+        const it = current.items.find(i => i.id === id);
+        if (it) it.sort_order = idx + 1;
+      });
+      repaintCategory(d.catId);
+      try {
+        await api('/api/categories/' + d.catId + '/reorder-items', { method: 'POST', body: JSON.stringify({ itemIds: ids }) });
+      } catch (e) { toast(e.message); refreshList(); }
+    }
+
+    async function applyCategoryReorder(d, cue) {
+      const ids = current.categories.map(c => c.id);
+      const from = ids.indexOf(d.id);
+      if (from === -1) return;
+      ids.splice(from, 1);
+      let to = ids.indexOf(cue.id);
+      if (to === -1) return;
+      if (cue.after) to++;
+      ids.splice(to, 0, d.id);
+      current.categories.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      current.categories.forEach((c, idx) => { c.sort_order = idx; });
+      repaintAllCategories();
+      try {
+        await api('/api/lists/' + current.list.id + '/reorder-categories', { method: 'POST', body: JSON.stringify({ categoryIds: ids }) });
+      } catch (e) { toast(e.message); refreshList(); }
     }
 
     // --- members modal ----------------------------------------------------------------
@@ -453,7 +660,6 @@
       try {
         await api('/api/lists/' + current.list.id + '/members', { method: 'POST', body: JSON.stringify({ username }) });
         current = await api('/api/lists/' + current.list.id);
-        renderMembers();
         renderList(current);
         openMembers();
         toast('@' + username.replace(/^@/, '') + ' added');
@@ -465,7 +671,6 @@
       try {
         await api('/api/lists/' + current.list.id + '/members/' + memberId, { method: 'DELETE' });
         current = await api('/api/lists/' + current.list.id);
-        renderMembers();
         renderList(current);
         openMembers();
       } catch (e) { toast(e.message); }

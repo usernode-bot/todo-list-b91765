@@ -153,8 +153,8 @@ app.get('/api/lists/:id', async (req, res) => {
 
     const [cats, items, members] = await Promise.all([
       pool.query(`SELECT id, name, is_default, sort_order FROM categories
-                   WHERE list_id = $1 ORDER BY is_default DESC, sort_order, id`, [list.id]),
-      pool.query(`SELECT i.id, i.category_id, i.text, i.checked, i.sort_order, i.completed_at, i.created_by
+                   WHERE list_id = $1 ORDER BY sort_order, id`, [list.id]),
+      pool.query(`SELECT i.id, i.category_id, i.text, i.checked, i.sort_order, i.completed_at, i.created_by, i.last_checked_by
                     FROM items i JOIN categories c ON i.category_id = c.id
                    WHERE c.list_id = $1
                    ORDER BY i.checked, i.sort_order, i.id`, [list.id]),
@@ -278,28 +278,33 @@ app.patch('/api/categories/:id', async (req, res) => {
   }
 });
 
-// Delete a category: its items move to the list's default category.
-// The default category itself can't be deleted.
+// Delete a category. By default its items move to the list's default
+// category; with ?deleteItems=1 the items are deleted along with it
+// (the FK cascade handles that). The default category itself can't be
+// deleted.
 app.delete('/api/categories/:id', async (req, res) => {
   const client = await pool.connect();
   try {
     const { category, role } = await getCategoryAccess(req.params.id, req.user);
     if (!category || !role) return res.status(404).json({ error: 'Category not found' });
     if (category.is_default) return res.status(400).json({ error: "The default category can't be deleted" });
+    const deleteItems = req.query.deleteItems === '1' || req.query.deleteItems === 'true';
 
     await client.query('BEGIN');
-    const def = await client.query(
-      `SELECT id FROM categories WHERE list_id = $1 AND is_default LIMIT 1`, [category.list_id]);
-    const defaultId = def.rows[0].id;
-    // Re-sequence moved items after the default category's existing ones,
-    // keeping unchecked and checked orderings intact.
-    await client.query(
-      `UPDATE items SET
-         category_id = $1,
-         sort_order = sort_order + COALESCE((SELECT MAX(sort_order) FROM items WHERE category_id = $1), 0) + 1
-       WHERE category_id = $2`,
-      [defaultId, category.id]
-    );
+    if (!deleteItems) {
+      const def = await client.query(
+        `SELECT id FROM categories WHERE list_id = $1 AND is_default LIMIT 1`, [category.list_id]);
+      const defaultId = def.rows[0].id;
+      // Re-sequence moved items after the default category's existing ones,
+      // keeping unchecked and checked orderings intact.
+      await client.query(
+        `UPDATE items SET
+           category_id = $1,
+           sort_order = sort_order + COALESCE((SELECT MAX(sort_order) FROM items WHERE category_id = $1), 0) + 1
+         WHERE category_id = $2`,
+        [defaultId, category.id]
+      );
+    }
     await client.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
     await client.query('COMMIT');
     res.json({ ok: true });
@@ -308,6 +313,53 @@ app.delete('/api/categories/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// Persist a drag-and-drop reorder of a list's categories. Takes the full
+// ordered array of category ids; positions are assigned from array order.
+app.post('/api/lists/:id/reorder-categories', async (req, res) => {
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+    const ids = req.body.categoryIds;
+    if (!Array.isArray(ids) || !ids.every(n => Number.isInteger(n))) {
+      return res.status(400).json({ error: 'categoryIds must be an array of ids' });
+    }
+    await pool.query(
+      `UPDATE categories c SET sort_order = x.ord
+         FROM (SELECT unnest($1::int[]) AS id, generate_subscripts($1::int[], 1) AS ord) x
+        WHERE c.id = x.id AND c.list_id = $2`,
+      [ids, list.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Persist a drag-and-drop reorder of items within one section (unchecked or
+// checked) of a category. Takes that section's full ordered array of item
+// ids; sort_order is assigned from array order. The checked and unchecked
+// sections keep independent sequences, which is fine — display always
+// filters by checked state before sorting.
+app.post('/api/categories/:id/reorder-items', async (req, res) => {
+  try {
+    const { category, role } = await getCategoryAccess(req.params.id, req.user);
+    if (!category || !role) return res.status(404).json({ error: 'Category not found' });
+    const ids = req.body.itemIds;
+    if (!Array.isArray(ids) || !ids.every(n => Number.isInteger(n))) {
+      return res.status(400).json({ error: 'itemIds must be an array of ids' });
+    }
+    await pool.query(
+      `UPDATE items i SET sort_order = x.ord
+         FROM (SELECT unnest($1::int[]) AS id, generate_subscripts($1::int[], 1) AS ord) x
+        WHERE i.id = x.id AND i.category_id = $2`,
+      [ids, category.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -354,10 +406,11 @@ app.patch('/api/items/:id', async (req, res) => {
         `UPDATE items SET
            checked = $1,
            completed_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+           last_checked_by = $4,
            sort_order = COALESCE((SELECT MAX(sort_order) FROM items
                                    WHERE category_id = $2 AND checked = $1 AND id <> $3), 0) + 1
          WHERE id = $3`,
-        [req.body.checked, item.category_id, item.id]
+        [req.body.checked, item.category_id, item.id, req.user.username]
       );
     }
 
@@ -496,8 +549,10 @@ async function start() {
       sort_order INTEGER NOT NULL DEFAULT 0,
       completed_at TIMESTAMPTZ,
       created_by VARCHAR(255),
+      last_checked_by VARCHAR(255),
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS last_checked_by VARCHAR(255);
     COMMENT ON TABLE items IS 'staging:private';
     CREATE INDEX IF NOT EXISTS items_category_idx ON items (category_id);
   `);
