@@ -85,6 +85,29 @@
     .cat-head:hover .cat-del { opacity: 1; }
     .drag-handle { cursor: grab; touch-action: none; }
     .drag-handle:active { cursor: grabbing; }
+    /* iOS-style swipe-to-reveal actions (mobile). The front layer and the
+       action buttons translate together: the buttons ride in from the right
+       edge with the gesture and ride back out when it closes. */
+    .swipe-wrap { touch-action: pan-y; }
+    .swipe-front { position: relative; transition: transform .18s ease-out; }
+    .swipe-actions { transform: translateX(100%); transition: transform .18s ease-out; }
+    /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
+    .item-row, .cat-head {
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none;
+    }
+    /* Mobile Safari zooms the whole viewport when focusing a field whose
+       font is under 16px — that's the screen "bounce" on tapping an input.
+       Bump fields to 16px on touch devices so focusing never zooms. */
+    @media (hover: none) and (pointer: coarse) {
+      input, textarea, select { font-size: 16px !important; }
+    }
+    input, textarea, button { touch-action: manipulation; }
+    /* Touch devices: no drag handles (long-press drags instead) and no
+       hover-revealed buttons (swipe left reveals rename/delete instead). */
+    @media (hover: none) and (pointer: coarse) {
+      .drag-handle, .hover-action, .cat-del { display: none !important; }
+    }
     .drop-before { box-shadow: 0 -2px 0 0 #8b5cf6; }
     .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
     .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
@@ -282,10 +305,7 @@
       // The global switch resets any per-category overrides so flipping it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
-      if (current) {
-        renderToggle();
-        repaintAllCategories();
-      }
+      if (current) repaintAllCategories();
     }
 
     // Per-category visibility of completed items (session-only override of the
@@ -302,6 +322,19 @@
     // Categories whose "Add an item…" input is currently revealed by the
     // header + button.
     const openAdders = new Set();
+
+    // The mobile keyboard's check/done key dismisses the keyboard (a blur)
+    // without submitting. On touch devices, accept whatever was typed when
+    // the field blurs with content. Enter-submits clear the field *before*
+    // awaiting the API call, so an Enter-then-blur sequence can't double-add.
+    function commitOnBlur(ev) {
+      if (!IS_TOUCH) return;
+      const input = ev.target;
+      if (!input.value.trim() || !input.form) return;
+      if (input.form.requestSubmit) input.form.requestSubmit();
+      else input.form.dispatchEvent(new Event('submit', { cancelable: true }));
+    }
+
     function toggleAdder(catId) {
       if (openAdders.has(catId)) openAdders.delete(catId);
       else openAdders.add(catId);
@@ -433,15 +466,19 @@
           <a href="#/" class="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
           <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-600 dark:hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
               ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-400 dark:text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
-          <div id="done-toggle" class="flex items-center gap-2 shrink-0"></div>
           <button onclick="openMembers()" title="Members"
                   class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300">
             👥 ${1 + d.members.length}
           </button>
           <div id="drawer-wrap" class="relative shrink-0">
             <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu"
-                    class="text-base leading-none px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">⋯</button>
+                    class="px-2.5 py-[7px] rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="block"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+            </button>
             <div id="drawer" class="hidden absolute right-0 top-full mt-1 w-56 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xl z-30 py-1.5">
+              <button onclick="closeDrawer(); setShowCompleted(true)" class="${DRAWER_ITEM}">✓&nbsp; Show all done</button>
+              <button onclick="closeDrawer(); setShowCompleted(false)" class="${DRAWER_ITEM}">⊘&nbsp; Hide all done</button>
+              <div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
               <button onclick="closeDrawer(); openExport()" class="${DRAWER_ITEM}">⤓&nbsp; Export markdown</button>
               <button onclick="closeDrawer(); openImport('merge')" class="${DRAWER_ITEM}">⤒&nbsp; Import markdown</button>
               <button onclick="cycleTheme()" id="theme-btn" class="${DRAWER_ITEM}">Theme: ${themeLabel()}</button>
@@ -458,24 +495,11 @@
 
         <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
           <span class="text-zinc-400 dark:text-zinc-600 text-sm select-none">+</span>
-          <input name="name" placeholder="New category…" autocomplete="off"
+          <input name="name" placeholder="New category…" autocomplete="off" enterkeyhint="done"
+                 onblur="commitOnBlur(event)"
                  class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
         </form>
       `;
-      renderToggle();
-    }
-
-    // iOS-Settings-style show-completed control: label + sliding switch.
-    function renderToggle() {
-      const el = document.getElementById('done-toggle');
-      if (!el) return;
-      const show = showCompleted();
-      el.innerHTML = `
-        <span class="text-xs text-zinc-500 dark:text-zinc-400 select-none cursor-pointer" onclick="setShowCompleted(${!show})">Show done</span>
-        <button role="switch" aria-checked="${show}" onclick="setShowCompleted(${!show})" title="${show ? 'Hide' : 'Show'} completed items"
-                class="relative w-9 h-[22px] rounded-full transition-colors duration-150 ${show ? 'bg-violet-600' : 'bg-zinc-300 dark:bg-zinc-700'}">
-          <span class="absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white shadow transition-transform duration-150 ${show ? 'translate-x-[14px]' : ''}"></span>
-        </button>`;
     }
 
     // --- drawer ------------------------------------------------------------------
@@ -491,6 +515,7 @@
     document.addEventListener('click', e => {
       const d = document.getElementById('drawer');
       if (d && !d.classList.contains('hidden') && !e.target.closest('#drawer-wrap')) closeDrawer();
+      if (openSwipe && !suppressTap && !e.target.closest('.swipe-actions')) closeOpenSwipe();
     });
 
     function renderCategory(c) {
@@ -500,19 +525,32 @@
       const empty = !unchecked.length && !checked.length;
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
-        <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
-          <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-300/80 dark:border-zinc-800/60">
-            <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-            <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
-                onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-400 dark:text-zinc-500 normal-case">✎</span></h2>
-            <button onclick="toggleAdder(${c.id})" title="Add an item"
-                    class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
-            <button onclick="deleteCategory(${c.id})" title="Delete category"
-                    class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
+        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section">
+          <div class="swipe-wrap relative overflow-hidden mb-1">
+            <div class="swipe-actions absolute inset-y-0 right-0 flex">
+              <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
+              <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+            </div>
+            <div class="swipe-front cat-head flex items-center gap-1.5 pb-1.5 border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+              <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
+              <h2 class="font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                  onclick="catTitleTap(event, ${c.id})" title="Rename category">${esc(c.name)}</h2>
+              <button onclick="toggleAdder(${c.id})" title="Add an item"
+                      class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
+              <button onclick="deleteCategory(${c.id})" title="Delete category"
+                      class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
+            </div>
           </div>
-          <div class="space-y-0.5">
+          ${openAdders.has(c.id) ? `
+          <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
+            <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
+            <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
+                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
+                   class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
+          </form>` : ''}
+          <div class="active-items space-y-0.5">
             ${unchecked.map(renderItem).join('')}
-            ${empty ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
+            ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           ${checked.length ? `
           <div class="flex items-center justify-start gap-2 my-1.5 px-1">
@@ -524,38 +562,50 @@
             <div class="${hairline}"></div>
           </div>
           ${showDone ? `<div class="space-y-0.5">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
-          ${openAdders.has(c.id) ? `
-          <form onsubmit="return addItem(event, ${c.id})" class="mt-0.5 flex items-center gap-2 px-1">
-            <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
-            <input name="text" placeholder="Add an item…" autocomplete="off"
-                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})"
-                   class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
-          </form>` : ''}
         </section>`;
     }
 
     // Tapping anywhere on the row toggles the item; interactive children
     // (checkbox, edit/delete buttons, drag handle) keep their own behavior.
+    // A tap that ends a swipe gesture (or lands while a row is swiped open)
+    // closes the swipe instead of toggling.
     function rowTap(ev, id) {
+      if (suppressTap) return;
+      if (openSwipe) { closeOpenSwipe(); return; }
       if (ev.target.closest('button, input, .drag-handle')) return;
       const item = current.items.find(i => i.id === id);
       if (item) toggleItem(id, !item.checked);
     }
 
+    // On touch devices renaming goes through the swipe actions, so a tap on
+    // the title shouldn't open the rename dialog.
+    function catTitleTap(ev, id) {
+      if (suppressTap) return;
+      if (openSwipe) { closeOpenSwipe(); return; }
+      if (IS_TOUCH) return;
+      renameCategory(id);
+    }
+
     function renderItem(i) {
       return `
-        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
-             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true"
-             onclick="rowTap(event, ${i.id})">
-          <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
-          <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
-                 class="todo-check">
-          <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
-          ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
-          <button onclick="editItem(${i.id})" title="Edit"
-                  class="opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
-          <button onclick="deleteItem(${i.id})" title="Delete"
-                  class="opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
+        <div class="swipe-wrap relative overflow-hidden rounded-lg">
+          <div class="swipe-actions absolute inset-y-0 right-0 flex">
+            <button onclick="editItem(${i.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
+            <button onclick="deleteItem(${i.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+          </div>
+          <div class="swipe-front item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
+               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH ? 'false' : 'true'}"
+               onclick="rowTap(event, ${i.id})">
+            <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
+            <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
+                   class="todo-check">
+            <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
+            ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
+            <button onclick="editItem(${i.id})" title="Edit"
+                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
+            <button onclick="deleteItem(${i.id})" title="Delete"
+                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
+          </div>
         </div>`;
     }
 
@@ -565,10 +615,12 @@
       const c = current.categories.find(x => x.id === catId);
       const el = document.getElementById('cat-' + catId);
       if (!c || !el) return;
+      openSwipe = null;
       el.outerHTML = renderCategory(c);
     }
     function repaintAllCategories() {
       const el = document.getElementById('cats');
+      openSwipe = null;
       if (el) el.innerHTML = displayCategories().map(c => renderCategory(c)).join('');
     }
 
@@ -597,16 +649,15 @@
       const input = ev.target.elements.name;
       const name = input.value.trim();
       if (!name) return false;
+      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
         const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
         current.categories.push(category);
         // Re-render all sections so the new (empty → active) category lands
         // above any fully-completed ones; the form itself isn't re-rendered,
-        // so input focus survives.
+        // so input focus (when it still has it) survives on its own.
         repaintAllCategories();
-        input.value = '';
-        input.focus();
-      } catch (e) { toast(e.message); }
+      } catch (e) { toast(e.message); input.value = name; }
       return false;
     }
 
@@ -646,14 +697,32 @@
       const input = ev.target.elements.text;
       const text = input.value.trim();
       if (!text) return false;
+      const hadFocus = document.activeElement === input;
+      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
         const pre = isCatFullyDone(categoryId);
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
-        current.items.push(item);
-        repaintSmart([categoryId], [pre]);
-        const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
-        if (next) next.focus();
-      } catch (e) { toast(e.message); }
+        current.items.push(item); // server gives it the smallest sort_order → top of the active list
+        if (isCatFullyDone(categoryId) !== pre) {
+          // Category left the fully-done group — full re-render, then put the
+          // caret back without scrolling (avoids the keyboard/scroll bounce).
+          // Skip the refocus when the keyboard was already dismissed.
+          repaintAllCategories();
+          if (hadFocus) {
+            const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+            if (next) next.focus({ preventScroll: true });
+          }
+        } else {
+          // Insert just the new row; the form (and its focus) is untouched,
+          // so the view stays perfectly still.
+          const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+          if (body) {
+            const ph = body.querySelector('.empty-note');
+            if (ph) ph.remove();
+            body.insertAdjacentHTML('afterbegin', renderItem(item));
+          }
+        }
+      } catch (e) { toast(e.message); input.value = text; }
       return false;
     }
 
@@ -722,38 +791,50 @@
       dropCue = null;
     }
 
-    appEl.addEventListener('dragover', e => {
-      if (!drag) return;
-      clearDropCue();
+    // Shared by desktop dragover and touch (long-press) drag. Computes the
+    // drop cue for the element under the pointer; returns true when that
+    // position is a valid drop target. Row cues paint on the swipe wrapper —
+    // the row itself sits inside overflow-hidden, which clips box-shadows.
+    function cueFromPoint(targetEl, clientY) {
+      if (!drag || !targetEl || !targetEl.closest) { clearDropCue(); return false; }
       if (drag.type === 'item') {
-        // Hovering a row of the same checked-state (any category): insert
-        // before/after it. Hovering elsewhere in a category section: append
-        // to the end of that category's matching section.
-        const row = e.target.closest && e.target.closest('.item-row');
-        if (row && (row.dataset.checked === '1') === drag.checked && +row.dataset.item !== drag.id) {
-          e.preventDefault();
+        // Over a row of the same checked-state (any category): insert
+        // before/after it. Elsewhere in a category section: append to the
+        // end of that category's matching section. Over the dragged row
+        // itself: keep the last cue so a drop there still lands somewhere.
+        const row = targetEl.closest('.item-row');
+        if (row && +row.dataset.item === drag.id) return true;
+        clearDropCue();
+        if (row && (row.dataset.checked === '1') === drag.checked) {
           const r = row.getBoundingClientRect();
-          const after = e.clientY > r.top + r.height / 2;
-          row.classList.add(after ? 'drop-after' : 'drop-before');
+          const after = clientY > r.top + r.height / 2;
+          (row.closest('.swipe-wrap') || row).classList.add(after ? 'drop-after' : 'drop-before');
           dropCue = { catId: +row.dataset.cat, id: +row.dataset.item, after };
-          return;
+          return true;
         }
-        if (row && +row.dataset.item === drag.id) { e.preventDefault(); return; } // hovering itself
-        const sec = e.target.closest && e.target.closest('.cat-section');
-        if (!sec) return;
-        e.preventDefault();
+        const sec = targetEl.closest('.cat-section');
+        if (!sec) return false;
         sec.classList.add('drop-into');
         dropCue = { catId: +sec.dataset.cat, end: true };
+        return true;
       } else {
-        const sec = e.target.closest && e.target.closest('.cat-section');
-        if (!sec) return;
-        if (+sec.dataset.cat === drag.id) { e.preventDefault(); return; }
-        e.preventDefault();
+        const sec = targetEl.closest('.cat-section');
+        if (!sec) { clearDropCue(); return false; }
+        // Over the dragged section itself (it's tall — this is the common
+        // case mid-drag): keep the last cue instead of wiping it.
+        if (+sec.dataset.cat === drag.id) return true;
+        clearDropCue();
         const r = sec.getBoundingClientRect();
-        const after = e.clientY > r.top + r.height / 2;
+        const after = clientY > r.top + r.height / 2;
         sec.classList.add(after ? 'drop-after' : 'drop-before');
         dropCue = { id: +sec.dataset.cat, after };
+        return true;
       }
+    }
+
+    appEl.addEventListener('dragover', e => {
+      if (!drag) return;
+      if (cueFromPoint(e.target, e.clientY)) e.preventDefault();
     });
 
     appEl.addEventListener('drop', e => {
@@ -773,6 +854,147 @@
       handleArmed = false;
       clearDropCue();
     });
+
+    // --- touch gestures (mobile) --------------------------------------------------
+    // Single tap toggles (via the row's click handler). Swipe left on a row or
+    // category header reveals Rename/Delete. Long-press (then move) drags to
+    // reorder — HTML5 DnD doesn't fire on touch, so this drives the same
+    // drag/dropCue state by hand.
+    const IS_TOUCH = window.matchMedia('(hover: none) and (pointer: coarse)').matches ||
+                     'ontouchstart' in window;
+    const SWIPE_W = 136;   // total width of the two revealed action buttons
+    let swipe = null;      // in-flight gesture: { wrap, front, startX, startY, dx, mode, wasOpen }
+    let openSwipe = null;  // .swipe-wrap currently left open
+    let lpTimer = null;    // long-press timer
+    let touchDragging = false;
+    let suppressTap = false;
+
+    // Positions the front layer and the action buttons as one unit: at
+    // offset 0 the actions sit just past the right edge (CSS default
+    // translateX(100%)); at -SWIPE_W they're fully revealed.
+    function setSwipeOffset(wrap, off, animate) {
+      const front = wrap.querySelector('.swipe-front');
+      const actions = wrap.querySelector('.swipe-actions');
+      const t = animate ? '' : 'none';
+      if (front) {
+        front.style.transition = t;
+        front.style.transform = off ? 'translateX(' + off + 'px)' : '';
+      }
+      if (actions) {
+        actions.style.transition = t;
+        actions.style.transform = off ? 'translateX(' + (SWIPE_W + off) + 'px)' : '';
+      }
+    }
+    function closeOpenSwipe() {
+      if (!openSwipe) return;
+      setSwipeOffset(openSwipe, 0, true);
+      openSwipe = null;
+    }
+    function suppressNextTap() {
+      suppressTap = true;
+      setTimeout(() => { suppressTap = false; }, 350);
+    }
+
+    appEl.addEventListener('touchstart', e => {
+      if (!current || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const wrap = e.target.closest && e.target.closest('.swipe-wrap');
+      swipe = wrap ? {
+        wrap,
+        startX: t.clientX, startY: t.clientY, dx: 0, mode: null,
+        wasOpen: wrap === openSwipe,
+      } : null;
+      clearTimeout(lpTimer);
+      if (e.target.closest && e.target.closest('button, input, a')) return;
+      const row = e.target.closest && e.target.closest('.item-row');
+      const head = e.target.closest && e.target.closest('.cat-head');
+      let info = null;
+      if (row) info = { type: 'item', id: +row.dataset.item, catId: +row.dataset.cat, checked: row.dataset.checked === '1', el: row };
+      else if (head) {
+        const sec = head.closest('.cat-section');
+        if (sec) info = { type: 'cat', id: +sec.dataset.cat, el: sec };
+      }
+      if (info) {
+        lpTimer = setTimeout(() => {
+          if (swipe && swipe.mode) return; // already swiping/scrolling
+          touchDragging = true;
+          drag = info;
+          info.el.classList.add('dragging');
+          closeOpenSwipe();
+          if (navigator.vibrate) navigator.vibrate(10);
+        }, 400);
+      }
+    }, { passive: true });
+
+    appEl.addEventListener('touchmove', e => {
+      const t = e.touches[0];
+      if (touchDragging) {
+        e.preventDefault(); // keep the page from scrolling under the drag
+        const el = document.elementFromPoint(t.clientX, t.clientY);
+        cueFromPoint(el, t.clientY);
+        return;
+      }
+      if (!swipe) return;
+      const dx = t.clientX - swipe.startX;
+      const dy = t.clientY - swipe.startY;
+      if (!swipe.mode) {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+          swipe.mode = 'h';
+          clearTimeout(lpTimer);
+        } else if (Math.abs(dy) > 10) {
+          clearTimeout(lpTimer);
+          swipe = null; // vertical scroll — hands off
+          return;
+        } else if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+          clearTimeout(lpTimer); // moved too much for a long-press
+        }
+      }
+      if (swipe.mode === 'h') {
+        e.preventDefault();
+        const base = swipe.wasOpen ? -SWIPE_W : 0;
+        swipe.dx = Math.max(-SWIPE_W, Math.min(0, base + dx));
+        setSwipeOffset(swipe.wrap, swipe.dx, false);
+      }
+    }, { passive: false });
+
+    appEl.addEventListener('touchend', () => {
+      clearTimeout(lpTimer);
+      if (touchDragging) {
+        touchDragging = false;
+        suppressNextTap();
+        document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+        const d = drag, cue = dropCue;
+        drag = null;
+        clearDropCue();
+        if (d && cue) (d.type === 'item' ? applyItemReorder(d, cue) : applyCategoryReorder(d, cue));
+        swipe = null;
+        return;
+      }
+      if (swipe && swipe.mode === 'h') {
+        if (openSwipe && openSwipe !== swipe.wrap) closeOpenSwipe();
+        if (swipe.dx < -SWIPE_W / 2) {
+          setSwipeOffset(swipe.wrap, -SWIPE_W, true);
+          openSwipe = swipe.wrap;
+        } else {
+          setSwipeOffset(swipe.wrap, 0, true);
+          if (openSwipe === swipe.wrap) openSwipe = null;
+        }
+        suppressNextTap();
+      }
+      swipe = null;
+    }, { passive: true });
+
+    appEl.addEventListener('touchcancel', () => {
+      clearTimeout(lpTimer);
+      if (touchDragging) {
+        touchDragging = false;
+        document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+        drag = null;
+        clearDropCue();
+      }
+      if (swipe) setSwipeOffset(swipe.wrap, swipe.wasOpen ? -SWIPE_W : 0, true);
+      swipe = null;
+    }, { passive: true });
 
     // Handles both same-category reorders and cross-category moves. The item
     // lands in the target category's matching checked/unchecked section, at
