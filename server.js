@@ -92,6 +92,70 @@ async function getItemAccess(itemId, user) {
 }
 
 // ---------------------------------------------------------------------------
+// SSE live updates
+//
+// Clients viewing a list subscribe to /api/lists/:id/events. Every mutation
+// broadcasts a small "something changed" event to that list's subscribers,
+// who refetch. Events carry the mutating client's id (x-client-id header)
+// so the originating tab can ignore its own echo.
+// ---------------------------------------------------------------------------
+
+const listStreams = new Map(); // listId -> Set<res>
+
+function broadcast(listId, event) {
+  const subs = listStreams.get(Number(listId));
+  if (!subs) return;
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of subs) {
+    try { res.write(payload); } catch (_) { /* dropped connection; close cleans up */ }
+  }
+}
+
+function notify(listId, req, type = 'changed') {
+  broadcast(listId, { type, sourceClient: req.headers['x-client-id'] || null });
+}
+
+function closeListStreams(listId) {
+  const subs = listStreams.get(Number(listId));
+  if (!subs) return;
+  for (const res of subs) { try { res.end(); } catch (_) {} }
+  listStreams.delete(Number(listId));
+}
+
+// Keep connections alive through proxies that time out idle streams.
+setInterval(() => {
+  for (const subs of listStreams.values()) {
+    for (const res of subs) { try { res.write(': ping\n\n'); } catch (_) {} }
+  }
+}, 25000).unref();
+
+// EventSource can't set headers, so auth rides the ?token= query param,
+// which the auth middleware already accepts.
+app.get('/api/lists/:id/events', async (req, res) => {
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('retry: 3000\n\n');
+    const key = Number(list.id);
+    let subs = listStreams.get(key);
+    if (!subs) listStreams.set(key, (subs = new Set()));
+    subs.add(res);
+    req.on('close', () => {
+      subs.delete(res);
+      if (!subs.size) listStreams.delete(key);
+    });
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Lists
 // ---------------------------------------------------------------------------
 
@@ -183,6 +247,7 @@ app.patch('/api/lists/:id', async (req, res) => {
     const name = (req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'List name is required' });
     await pool.query(`UPDATE lists SET name = $1 WHERE id = $2`, [name, list.id]);
+    notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -196,6 +261,8 @@ app.delete('/api/lists/:id', async (req, res) => {
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
     if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can delete the list' });
     await pool.query(`DELETE FROM lists WHERE id = $1`, [list.id]);
+    notify(list.id, req, 'list-deleted');
+    closeListStreams(list.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -315,6 +382,7 @@ app.post('/api/lists/:id/import', async (req, res) => {
     }
     await importCategoriesInto(client, list.id, req.body.categories, req.user.username);
     await client.query('COMMIT');
+    notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -345,6 +413,7 @@ app.post('/api/lists/:id/members', async (req, res) => {
       [list.id, username]
     );
     if (!rows.length) return res.status(409).json({ error: `@${username} is already a member` });
+    notify(list.id, req);
     res.json({ member: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -358,6 +427,7 @@ app.delete('/api/lists/:id/members/:memberId', async (req, res) => {
     if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can remove members' });
     await pool.query(`DELETE FROM list_members WHERE id = $1 AND list_id = $2`,
                      [req.params.memberId, list.id]);
+    notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -381,6 +451,7 @@ app.post('/api/lists/:id/categories', async (req, res) => {
        RETURNING *`,
       [list.id, name]
     );
+    notify(list.id, req);
     res.json({ category: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -394,6 +465,7 @@ app.patch('/api/categories/:id', async (req, res) => {
     const name = (req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Category name is required' });
     await pool.query(`UPDATE categories SET name = $1 WHERE id = $2`, [name, category.id]);
+    notify(category.list_id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -413,6 +485,7 @@ app.delete('/api/categories/:id', async (req, res) => {
       return res.status(400).json({ error: "Can't delete the only category — lists need at least one" });
     }
     await pool.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
+    notify(category.list_id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -435,6 +508,7 @@ app.post('/api/lists/:id/reorder-categories', async (req, res) => {
         WHERE c.id = x.id AND c.list_id = $2`,
       [ids, list.id]
     );
+    notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -460,6 +534,7 @@ app.post('/api/categories/:id/reorder-items', async (req, res) => {
         WHERE i.id = x.id AND i.category_id = $2`,
       [ids, category.id]
     );
+    notify(category.list_id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -484,6 +559,7 @@ app.post('/api/categories/:id/items', async (req, res) => {
        RETURNING *`,
       [category.id, text, req.user.username]
     );
+    notify(category.list_id, req);
     res.json({ item: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -496,7 +572,7 @@ app.post('/api/categories/:id/items', async (req, res) => {
 // item at the end of the matching section of the target category.
 app.patch('/api/items/:id', async (req, res) => {
   try {
-    const { item, role } = await getItemAccess(req.params.id, req.user);
+    const { item, list, role } = await getItemAccess(req.params.id, req.user);
     if (!item || !role) return res.status(404).json({ error: 'Item not found' });
 
     if (typeof req.body.text === 'string') {
@@ -539,6 +615,7 @@ app.patch('/api/items/:id', async (req, res) => {
     }
 
     const { rows } = await pool.query(`SELECT * FROM items WHERE id = $1`, [item.id]);
+    notify(list.id, req);
     res.json({ item: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -547,9 +624,10 @@ app.patch('/api/items/:id', async (req, res) => {
 
 app.delete('/api/items/:id', async (req, res) => {
   try {
-    const { item, role } = await getItemAccess(req.params.id, req.user);
+    const { item, list, role } = await getItemAccess(req.params.id, req.user);
     if (!item || !role) return res.status(404).json({ error: 'Item not found' });
     await pool.query(`DELETE FROM items WHERE id = $1`, [item.id]);
+    notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
