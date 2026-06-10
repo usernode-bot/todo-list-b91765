@@ -403,6 +403,28 @@
         .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
     }
 
+    // Display order: categories whose items are all completed (and that have
+    // at least one item) sink below the rest. This is a render-time grouping
+    // only — current.categories keeps the manual drag order, which is
+    // preserved within each group and is what gets persisted.
+    function isCatFullyDone(catId) {
+      const items = current.items.filter(i => i.category_id === catId);
+      return items.length > 0 && items.every(i => i.checked);
+    }
+    function displayCategories() {
+      const active = [], done = [];
+      for (const c of current.categories) (isCatFullyDone(c.id) ? done : active).push(c);
+      return active.concat(done);
+    }
+    // After an item mutation: if any affected category crossed the
+    // fully-done boundary, re-render all sections so it moves groups;
+    // otherwise repaint just the affected sections in place.
+    function repaintSmart(catIds, preStatus) {
+      const moved = catIds.some((id, i) => isCatFullyDone(id) !== preStatus[i]);
+      if (moved) repaintAllCategories();
+      else catIds.forEach(id => repaintCategory(id));
+    }
+
     function renderList(d) {
       const isOwner = d.role === 'owner';
       const app = document.getElementById('app');
@@ -431,7 +453,7 @@
         </header>
 
         <div id="cats" class="space-y-7">
-          ${d.categories.map(c => renderCategory(c)).join('')}
+          ${displayCategories().map(c => renderCategory(c)).join('')}
         </div>
 
         <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
@@ -476,7 +498,7 @@
       const unchecked = sectionItems(c.id, false);
       const checked = sectionItems(c.id, true);
       const empty = !unchecked.length && !checked.length;
-      const hairline = 'flex-1 border-t border-zinc-300/80 dark:border-zinc-800/60';
+      const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
           <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-300/80 dark:border-zinc-800/60">
@@ -493,7 +515,7 @@
             ${empty ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           ${checked.length ? `
-          <div class="flex items-center gap-2 my-1.5 px-1">
+          <div class="flex items-center justify-center gap-2 my-1.5 px-1">
             <div class="${hairline}"></div>
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                     class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
@@ -547,7 +569,7 @@
     }
     function repaintAllCategories() {
       const el = document.getElementById('cats');
-      if (el) el.innerHTML = current.categories.map(c => renderCategory(c)).join('');
+      if (el) el.innerHTML = displayCategories().map(c => renderCategory(c)).join('');
     }
 
     // --- list actions ------------------------------------------------------------
@@ -578,7 +600,10 @@
       try {
         const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
         current.categories.push(category);
-        document.getElementById('cats').insertAdjacentHTML('beforeend', renderCategory(category));
+        // Re-render all sections so the new (empty → active) category lands
+        // above any fully-completed ones; the form itself isn't re-rendered,
+        // so input focus survives.
+        repaintAllCategories();
         input.value = '';
         input.focus();
       } catch (e) { toast(e.message); }
@@ -622,9 +647,10 @@
       const text = input.value.trim();
       if (!text) return false;
       try {
+        const pre = isCatFullyDone(categoryId);
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
         current.items.push(item);
-        repaintCategory(categoryId);
+        repaintSmart([categoryId], [pre]);
         const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
         if (next) next.focus();
       } catch (e) { toast(e.message); }
@@ -633,10 +659,12 @@
 
     async function toggleItem(id, checked) {
       try {
+        const before = current.items.find(i => i.id === id);
+        const pre = before ? isCatFullyDone(before.category_id) : false;
         const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
-        repaintCategory(item.category_id);
+        repaintSmart([item.category_id], [pre]);
       } catch (e) { toast(e.message); refreshList(); }
     }
 
@@ -655,9 +683,10 @@
     async function deleteItem(id) {
       const item = current.items.find(i => i.id === id);
       try {
+        const pre = item ? isCatFullyDone(item.category_id) : false;
         await api('/api/items/' + id, { method: 'DELETE' });
         current.items = current.items.filter(i => i.id !== id);
-        if (item) repaintCategory(item.category_id);
+        if (item) repaintSmart([item.category_id], [pre]);
       } catch (e) { toast(e.message); }
     }
 
@@ -766,14 +795,15 @@
         const before = sectionItems(d.catId, d.checked).map(i => i.id);
         if (before[before.length - 1] === d.id) return;
       }
+      const affected = sameCat ? [d.catId] : [d.catId, cue.catId];
+      const pre = affected.map(isCatFullyDone);
       ids.splice(to, 0, d.id);
       item.category_id = cue.catId;
       ids.forEach((id, idx) => {
         const it = current.items.find(i => i.id === id);
         if (it) it.sort_order = idx + 1;
       });
-      repaintCategory(d.catId);
-      if (!sameCat) repaintCategory(cue.catId);
+      repaintSmart(affected, pre);
       try {
         if (!sameCat) {
           await api('/api/items/' + d.id, { method: 'PATCH', body: JSON.stringify({ category_id: cue.catId }) });
