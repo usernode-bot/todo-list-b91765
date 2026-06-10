@@ -89,6 +89,28 @@
     .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
     .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
     .dragging { opacity: 0.4; }
+    /* Custom checkbox — native ones render a washed-out light box in dark mode. */
+    .todo-check {
+      appearance: none; -webkit-appearance: none;
+      width: 1.05rem; height: 1.05rem;
+      border-radius: 0.3rem;
+      border: 1.5px solid #a1a1aa;        /* zinc-400 */
+      background: #ffffff;
+      cursor: pointer; position: relative; flex-shrink: 0;
+      transition: background .1s, border-color .1s;
+    }
+    .dark .todo-check {
+      border-color: #52525b;              /* zinc-600 */
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .todo-check:hover { border-color: #8b5cf6; }
+    .todo-check:checked { background: #7c3aed; border-color: #7c3aed; }
+    .todo-check:checked::after {
+      content: ''; position: absolute;
+      left: 4.5px; top: 1.5px; width: 5px; height: 9px;
+      border: solid #fff; border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
   </style>
 </head>
 <body class="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen">
@@ -257,9 +279,36 @@
     }
     function setShowCompleted(v) {
       localStorage.setItem(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
+      // The global switch resets any per-category overrides so flipping it
+      // always visibly applies everywhere.
+      for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
       if (current) {
         renderToggle();
         repaintAllCategories();
+      }
+    }
+
+    // Per-category visibility of completed items (session-only override of the
+    // global switch), toggled from the divider between active and done items.
+    const catDoneOverrides = {};
+    function catShowDone(catId) {
+      return catDoneOverrides[catId] !== undefined ? catDoneOverrides[catId] : showCompleted();
+    }
+    function toggleCatDone(catId) {
+      catDoneOverrides[catId] = !catShowDone(catId);
+      repaintCategory(catId);
+    }
+
+    // Categories whose "Add an item…" input is currently revealed by the
+    // header + button.
+    const openAdders = new Set();
+    function toggleAdder(catId) {
+      if (openAdders.has(catId)) openAdders.delete(catId);
+      else openAdders.add(catId);
+      repaintCategory(catId);
+      if (openAdders.has(catId)) {
+        const input = document.querySelector('#cat-' + catId + ' input[name=text]');
+        if (input) input.focus();
       }
     }
 
@@ -423,41 +472,62 @@
     });
 
     function renderCategory(c) {
-      const show = showCompleted();
+      const showDone = catShowDone(c.id);
       const unchecked = sectionItems(c.id, false);
       const checked = sectionItems(c.id, true);
       const empty = !unchecked.length && !checked.length;
+      const hairline = 'flex-1 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
           <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-300/80 dark:border-zinc-800/60">
             <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
             <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
                 onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-400 dark:text-zinc-500 normal-case">✎</span></h2>
+            <button onclick="toggleAdder(${c.id})" title="Add an item"
+                    class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
             <button onclick="deleteCategory(${c.id})" title="Delete category"
                     class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
           </div>
           <div class="space-y-0.5">
             ${unchecked.map(renderItem).join('')}
-            ${show
-              ? checked.map(renderItem).join('')
-              : (checked.length ? `<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '')}
             ${empty ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
+          ${checked.length ? `
+          <div class="flex items-center gap-2 my-1.5 px-1">
+            <div class="${hairline}"></div>
+            <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
+                    class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
+              ${checked.length} done ${showDone ? '▾' : '▸'}
+            </button>
+            <div class="${hairline}"></div>
+          </div>
+          ${showDone ? `<div class="space-y-0.5">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
+          ${openAdders.has(c.id) ? `
           <form onsubmit="return addItem(event, ${c.id})" class="mt-0.5 flex items-center gap-2 px-1">
             <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
             <input name="text" placeholder="Add an item…" autocomplete="off"
+                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})"
                    class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
-          </form>
+          </form>` : ''}
         </section>`;
+    }
+
+    // Tapping anywhere on the row toggles the item; interactive children
+    // (checkbox, edit/delete buttons, drag handle) keep their own behavior.
+    function rowTap(ev, id) {
+      if (ev.target.closest('button, input, .drag-handle')) return;
+      const item = current.items.find(i => i.id === id);
+      if (item) toggleItem(id, !item.checked);
     }
 
     function renderItem(i) {
       return `
-        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
-             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true">
+        <div class="item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
+             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="true"
+             onclick="rowTap(event, ${i.id})">
           <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
           <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
-                 class="w-4 h-4 shrink-0 rounded accent-violet-600 cursor-pointer">
+                 class="todo-check">
           <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
           ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
           <button onclick="editItem(${i.id})" title="Edit"
@@ -850,18 +920,22 @@
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     }
 
-    // mode 'new' (from Home: create a list) or 'merge' (fill the current list).
+    // mode 'new' (from Home: create a list) or 'merge' (into the current list,
+    // which offers both add and replace).
     function openImport(mode) {
       openMd({
         title: 'Import markdown',
         hint: mode === 'new'
           ? 'Paste markdown to create a new list. ~~Strikethrough~~ items import as completed.'
-          : 'Paste markdown to add to this list. Categories with matching names merge; ~~strikethrough~~ items import as completed.',
+          : 'Paste markdown to import into this list. Add merges into matching categories; Replace clears the list first. ~~Strikethrough~~ items import as completed.',
         text: '',
         readonly: false,
-        actionsHtml: `
+        actionsHtml: mode === 'new' ? `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
-          <button onclick="runImport('${mode}')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import</button>`,
+          <button onclick="runImport('new')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import</button>` : `
+          <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
+          <button onclick="runImport('replace')" class="text-sm px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white">Import (replace)</button>
+          <button onclick="runImport('add')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import (add)</button>`,
       });
     }
 
@@ -881,12 +955,16 @@
           if (location.hash === '#/list/' + list.id) loadList(list.id);
           else location.hash = '#/list/' + list.id;
         } else {
+          if (mode === 'replace' &&
+              !await askConfirm('Replace everything in "' + current.list.name + '" with the imported content?', 'Replace')) {
+            return;
+          }
           await api('/api/lists/' + current.list.id + '/import', {
             method: 'POST',
-            body: JSON.stringify({ categories }),
+            body: JSON.stringify({ categories, mode }),
           });
           closeMd();
-          toast('Imported');
+          toast(mode === 'replace' ? 'List replaced' : 'Imported');
           refreshList();
         }
       } catch (e) { toast(e.message); }

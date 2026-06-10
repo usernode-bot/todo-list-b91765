@@ -297,15 +297,22 @@ app.post('/api/lists/import', async (req, res) => {
   }
 });
 
-// Import markdown into an existing list (owner or member).
+// Import markdown into an existing list (owner or member). mode 'add'
+// (default) merges into existing categories; mode 'replace' wipes the list's
+// categories/items first — safe to do inside the transaction because the
+// validated payload is non-empty, so the at-least-one-category rule holds.
 app.post('/api/lists/:id/import', async (req, res) => {
   const badPayload = invalidImportPayload(req.body.categories);
   if (badPayload) return res.status(400).json({ error: badPayload });
+  const mode = req.body.mode === 'replace' ? 'replace' : 'add';
   const client = await pool.connect();
   try {
     const { list, role } = await getListRole(req.params.id, req.user);
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
     await client.query('BEGIN');
+    if (mode === 'replace') {
+      await client.query(`DELETE FROM categories WHERE list_id = $1`, [list.id]);
+    }
     await importCategoriesInto(client, list.id, req.body.categories, req.user.username);
     await client.query('COMMIT');
     res.json({ ok: true });
