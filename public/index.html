@@ -181,7 +181,10 @@
     // --- auth / api ----------------------------------------------------------
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token') || '';
-    const headers = token ? { 'x-usernode-token': token } : {};
+    // Random per-tab id sent with every mutation; SSE events echo it back so
+    // the tab that made a change can skip refetching its own edit.
+    const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const headers = { 'x-client-id': clientId, ...(token ? { 'x-usernode-token': token } : {}) };
 
     async function api(path, opts = {}) {
       const res = await fetch(path, {
@@ -345,6 +348,53 @@
       }
     }
 
+    // --- live updates (SSE) ----------------------------------------------------
+    // While a list is open, subscribe to its event stream; any change made by
+    // another client triggers a silent refetch. EventSource retries transient
+    // drops itself (server sends retry: 3000); if the browser gives up on a
+    // fatal error we reopen manually after the same delay.
+    let es = null, esListId = null, esRetryTimer = null, liveRefreshTimer = null;
+
+    function connectEvents(listId) {
+      if (es && esListId === listId) return;
+      disconnectEvents();
+      esListId = listId;
+      openStream();
+    }
+
+    function openStream() {
+      if (!esListId) return;
+      es = new EventSource('/api/lists/' + esListId + '/events?token=' +
+                           encodeURIComponent(token) + '&clientId=' + clientId);
+      es.onmessage = ev => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (_) { return; }
+        if (data.sourceClient && data.sourceClient === clientId) return; // our own edit
+        if (data.type === 'list-deleted') {
+          toast('This list was deleted');
+          location.hash = '#/';
+          return;
+        }
+        // Coalesce bursts (imports, reorders) into a single refetch.
+        clearTimeout(liveRefreshTimer);
+        liveRefreshTimer = setTimeout(refreshList, 150);
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          es = null;
+          clearTimeout(esRetryTimer);
+          esRetryTimer = setTimeout(openStream, 3000);
+        }
+      };
+    }
+
+    function disconnectEvents() {
+      clearTimeout(esRetryTimer);
+      clearTimeout(liveRefreshTimer);
+      if (es) { es.close(); es = null; }
+      esListId = null;
+    }
+
     // --- routing --------------------------------------------------------------
     let current = null; // current list detail payload (List View) or null (Home)
 
@@ -358,6 +408,7 @@
     // --- Home / My Lists -------------------------------------------------------
     async function loadHome() {
       current = null;
+      disconnectEvents();
       const app = document.getElementById('app');
       app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
       let lists;
@@ -413,19 +464,44 @@
       try {
         current = await api('/api/lists/' + id);
       } catch (e) {
+        disconnectEvents();
         app.innerHTML = `<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">${esc(e.message)}</p>
           <p class="text-center"><a href="#/" class="text-violet-600 dark:text-violet-400 text-sm">← Back to My Lists</a></p>`;
         return;
       }
       renderList(current);
+      connectEvents(current.list.id);
     }
 
     // Silent refetch + single repaint — no "Loading…" wipe, so no flash.
+    // Used for both error recovery and SSE-pushed remote changes, so it
+    // preserves any in-progress typing in an add-item / new-category field
+    // across the repaint.
     async function refreshList() {
       if (!current) return;
+      const id = current.list.id;
       try {
-        current = await api('/api/lists/' + current.list.id);
+        const data = await api('/api/lists/' + id);
+        if (!current || current.list.id !== id) return; // navigated away mid-fetch
+        current = data;
+        const ae = document.activeElement;
+        let focus = null;
+        if (ae && ae.tagName === 'INPUT') {
+          if (ae.name === 'text' && ae.closest('.cat-section')) {
+            focus = { sel: '#cat-' + ae.closest('.cat-section').dataset.cat + ' input[name=text]', value: ae.value, pos: ae.selectionStart };
+          } else if (ae.name === 'name') {
+            focus = { sel: 'input[name=name]', value: ae.value, pos: ae.selectionStart };
+          }
+        }
         renderList(current);
+        if (focus) {
+          const input = document.querySelector(focus.sel);
+          if (input) {
+            input.value = focus.value;
+            input.focus({ preventScroll: true });
+            try { input.setSelectionRange(focus.pos, focus.pos); } catch (_) {}
+          }
+        }
       } catch (e) { toast(e.message); }
     }
 
@@ -436,26 +512,10 @@
         .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
     }
 
-    // Display order: categories whose items are all completed (and that have
-    // at least one item) sink below the rest. This is a render-time grouping
-    // only — current.categories keeps the manual drag order, which is
-    // preserved within each group and is what gets persisted.
-    function isCatFullyDone(catId) {
-      const items = current.items.filter(i => i.category_id === catId);
-      return items.length > 0 && items.every(i => i.checked);
-    }
+    // Display order is the manual drag order (current.categories) — static.
+    // Categories never move around based on whether their items are done.
     function displayCategories() {
-      const active = [], done = [];
-      for (const c of current.categories) (isCatFullyDone(c.id) ? done : active).push(c);
-      return active.concat(done);
-    }
-    // After an item mutation: if any affected category crossed the
-    // fully-done boundary, re-render all sections so it moves groups;
-    // otherwise repaint just the affected sections in place.
-    function repaintSmart(catIds, preStatus) {
-      const moved = catIds.some((id, i) => isCatFullyDone(id) !== preStatus[i]);
-      if (moved) repaintAllCategories();
-      else catIds.forEach(id => repaintCategory(id));
+      return current.categories;
     }
 
     function renderList(d) {
@@ -653,9 +713,8 @@
       try {
         const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
         current.categories.push(category);
-        // Re-render all sections so the new (empty → active) category lands
-        // above any fully-completed ones; the form itself isn't re-rendered,
-        // so input focus (when it still has it) survives on its own.
+        // The form itself isn't re-rendered, so input focus (when it still
+        // has it) survives on its own.
         repaintAllCategories();
       } catch (e) { toast(e.message); input.value = name; }
       return false;
@@ -697,30 +756,17 @@
       const input = ev.target.elements.text;
       const text = input.value.trim();
       if (!text) return false;
-      const hadFocus = document.activeElement === input;
       input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
-        const pre = isCatFullyDone(categoryId);
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
         current.items.push(item); // server gives it the smallest sort_order → top of the active list
-        if (isCatFullyDone(categoryId) !== pre) {
-          // Category left the fully-done group — full re-render, then put the
-          // caret back without scrolling (avoids the keyboard/scroll bounce).
-          // Skip the refocus when the keyboard was already dismissed.
-          repaintAllCategories();
-          if (hadFocus) {
-            const next = document.querySelector('#cat-' + categoryId + ' input[name=text]');
-            if (next) next.focus({ preventScroll: true });
-          }
-        } else {
-          // Insert just the new row; the form (and its focus) is untouched,
-          // so the view stays perfectly still.
-          const body = document.querySelector('#cat-' + categoryId + ' .active-items');
-          if (body) {
-            const ph = body.querySelector('.empty-note');
-            if (ph) ph.remove();
-            body.insertAdjacentHTML('afterbegin', renderItem(item));
-          }
+        // Insert just the new row; the form (and its focus) is untouched,
+        // so the view stays perfectly still.
+        const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+        if (body) {
+          const ph = body.querySelector('.empty-note');
+          if (ph) ph.remove();
+          body.insertAdjacentHTML('afterbegin', renderItem(item));
         }
       } catch (e) { toast(e.message); input.value = text; }
       return false;
@@ -728,12 +774,10 @@
 
     async function toggleItem(id, checked) {
       try {
-        const before = current.items.find(i => i.id === id);
-        const pre = before ? isCatFullyDone(before.category_id) : false;
         const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
-        repaintSmart([item.category_id], [pre]);
+        repaintCategory(item.category_id);
       } catch (e) { toast(e.message); refreshList(); }
     }
 
@@ -752,10 +796,9 @@
     async function deleteItem(id) {
       const item = current.items.find(i => i.id === id);
       try {
-        const pre = item ? isCatFullyDone(item.category_id) : false;
         await api('/api/items/' + id, { method: 'DELETE' });
         current.items = current.items.filter(i => i.id !== id);
-        if (item) repaintSmart([item.category_id], [pre]);
+        if (item) repaintCategory(item.category_id);
       } catch (e) { toast(e.message); }
     }
 
@@ -1018,14 +1061,13 @@
         if (before[before.length - 1] === d.id) return;
       }
       const affected = sameCat ? [d.catId] : [d.catId, cue.catId];
-      const pre = affected.map(isCatFullyDone);
       ids.splice(to, 0, d.id);
       item.category_id = cue.catId;
       ids.forEach((id, idx) => {
         const it = current.items.find(i => i.id === id);
         if (it) it.sort_order = idx + 1;
       });
-      repaintSmart(affected, pre);
+      affected.forEach(repaintCategory);
       try {
         if (!sameCat) {
           await api('/api/items/' + d.id, { method: 'PATCH', body: JSON.stringify({ category_id: cue.catId }) });
