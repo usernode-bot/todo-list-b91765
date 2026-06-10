@@ -67,12 +67,15 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
-    .cat-name .pencil { opacity: 0; transition: opacity .12s; }
-    .cat-name:hover .pencil { opacity: 1; }
+    .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
+    .pencil-host:hover .pencil { opacity: 1; }
+    .cat-head .cat-del { opacity: 0; transition: opacity .12s; }
+    .cat-head:hover .cat-del { opacity: 1; }
     .drag-handle { cursor: grab; touch-action: none; }
     .drag-handle:active { cursor: grabbing; }
     .drop-before { box-shadow: 0 -2px 0 0 #8b5cf6; }
     .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
+    .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
     .dragging { opacity: 0.4; }
   </style>
 </head>
@@ -88,6 +91,20 @@
         <button onclick="closeMembers()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
       </div>
       <div id="members-body"></div>
+    </div>
+  </div>
+
+  <!-- Markdown import/export modal -->
+  <div id="md-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
+      <div class="flex items-center justify-between">
+        <h2 id="md-title" class="font-semibold text-lg"></h2>
+        <button onclick="closeMd()" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
+      </div>
+      <p id="md-hint" class="text-xs text-zinc-500"></p>
+      <textarea id="md-text" rows="14" spellcheck="false"
+                class="w-full flex-1 bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-xs font-mono text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-violet-600 resize-none"></textarea>
+      <div id="md-actions" class="flex justify-end gap-2"></div>
     </div>
   </div>
 
@@ -221,7 +238,10 @@
       app.innerHTML = `
         <header class="flex items-center justify-between py-3 mb-4">
           <h1 class="text-xl font-bold">My Lists</h1>
-          <button onclick="newList()" class="bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg">+ New List</button>
+          <div class="flex items-center gap-2">
+            <button onclick="openImport('new')" class="text-zinc-400 hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-800">Import</button>
+            <button onclick="newList()" class="bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg">+ New List</button>
+          </div>
         </header>
         ${lists.length ? '<div class="space-y-2">' + lists.map(l => `
           <a href="#/list/${l.id}" class="block bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-xl px-4 py-3">
@@ -286,11 +306,15 @@
       const isOwner = d.role === 'owner';
       const app = document.getElementById('app');
       app.innerHTML = `
-        <header class="flex items-center gap-2 py-3 mb-3">
+        <header class="flex items-center gap-2 py-3 mb-3 flex-wrap">
           <a href="#/" class="text-zinc-400 hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
-          <h1 class="text-xl font-bold flex-1 truncate ${isOwner ? 'cursor-pointer hover:text-violet-300' : ''}"
-              ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
-          <div id="done-toggle" class="flex rounded-lg border border-zinc-800 overflow-hidden text-xs shrink-0"></div>
+          <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
+              ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
+          <div id="done-toggle" class="flex items-center gap-2 shrink-0"></div>
+          <button onclick="openExport()" title="Export markdown"
+                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-200" aria-label="Export markdown">⤓</button>
+          <button onclick="openImport('merge')" title="Import markdown into this list"
+                  class="text-xs px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-200" aria-label="Import markdown">⤒</button>
           <button onclick="openMembers()" title="Members"
                   class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-300">
             👥 ${1 + d.members.length}
@@ -303,26 +327,26 @@
           ${d.categories.map(c => renderCategory(c)).join('')}
         </div>
 
-        <form onsubmit="return addCategory(event)" class="mt-8 flex gap-2">
+        <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
+          <span class="text-zinc-600 text-sm select-none">+</span>
           <input name="name" placeholder="New category…" autocomplete="off"
-                 class="flex-1 bg-zinc-900/50 border border-zinc-800/70 rounded-lg px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
-          <button class="text-sm px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Add</button>
+                 class="flex-1 bg-transparent text-sm placeholder-zinc-600 text-zinc-300 focus:outline-none py-1.5">
         </form>
       `;
       renderToggle();
     }
 
-    // Segmented show/hide-completed control: both options visible, active one
-    // highlighted.
+    // iOS-Settings-style show-completed control: label + sliding switch.
     function renderToggle() {
       const el = document.getElementById('done-toggle');
       if (!el) return;
       const show = showCompleted();
-      const on = 'px-2.5 py-1.5 bg-violet-600/25 text-violet-200 font-medium';
-      const off = 'px-2.5 py-1.5 bg-zinc-900 text-zinc-500 hover:text-zinc-300';
       el.innerHTML = `
-        <button onclick="setShowCompleted(true)" class="${show ? on : off}">Show done</button>
-        <button onclick="setShowCompleted(false)" class="border-l border-zinc-800 ${show ? off : on}">Hide done</button>`;
+        <span class="text-xs text-zinc-400 select-none cursor-pointer" onclick="setShowCompleted(${!show})">Show done</span>
+        <button role="switch" aria-checked="${show}" onclick="setShowCompleted(${!show})" title="${show ? 'Hide' : 'Show'} completed items"
+                class="relative w-9 h-[22px] rounded-full transition-colors duration-150 ${show ? 'bg-violet-600' : 'bg-zinc-700'}">
+          <span class="absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white shadow transition-transform duration-150 ${show ? 'translate-x-[14px]' : ''}"></span>
+        </button>`;
     }
 
     function renderCategory(c) {
@@ -332,14 +356,14 @@
       const empty = !unchecked.length && !checked.length;
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="true" class="cat-section">
-          <div class="flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-800/60">
+          <div class="cat-head flex items-center gap-1.5 pb-1.5 mb-1 border-b border-zinc-800/60">
             <span class="drag-handle text-zinc-700 hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-            <h2 class="cat-name font-semibold text-sm uppercase tracking-wide text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-200"
+            <h2 class="pencil-host font-semibold text-sm uppercase tracking-wide text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-200"
                 onclick="renameCategory(${c.id})" title="Rename category">${esc(c.name)} <span class="pencil text-zinc-500 normal-case">✎</span></h2>
             ${c.is_default
               ? '<span class="text-[10px] text-zinc-600 uppercase">default</span>'
               : `<button onclick="deleteCategory(${c.id})" title="Delete category"
-                   class="text-zinc-600 hover:text-red-400 text-sm px-1">🗑</button>`}
+                   class="cat-del text-zinc-600 hover:text-red-400 text-sm px-1">🗑</button>`}
           </div>
           <div class="space-y-0.5">
             ${unchecked.map(renderItem).join('')}
@@ -348,10 +372,10 @@
               : (checked.length ? `<p class="text-xs text-zinc-600 px-1 py-1">${checked.length} completed hidden</p>` : '')}
             ${empty ? '<p class="text-xs text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
-          <form onsubmit="return addItem(event, ${c.id})" class="mt-1.5 flex gap-2">
+          <form onsubmit="return addItem(event, ${c.id})" class="mt-0.5 flex items-center gap-2 px-1">
+            <span class="text-zinc-600 text-sm w-4 text-center select-none">+</span>
             <input name="text" placeholder="Add an item…" autocomplete="off"
-                   class="flex-1 bg-zinc-900/50 border border-zinc-800/70 rounded-lg px-3 py-1.5 text-sm placeholder-zinc-600 focus:outline-none focus:border-violet-600">
-            <button class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">+</button>
+                   class="flex-1 bg-transparent text-sm placeholder-zinc-600 text-zinc-300 focus:outline-none py-1.5">
           </form>
         </section>`;
     }
@@ -529,8 +553,8 @@
     });
 
     function clearDropCue() {
-      document.querySelectorAll('.drop-before, .drop-after').forEach(el =>
-        el.classList.remove('drop-before', 'drop-after'));
+      document.querySelectorAll('.drop-before, .drop-after, .drop-into').forEach(el =>
+        el.classList.remove('drop-before', 'drop-after', 'drop-into'));
       dropCue = null;
     }
 
@@ -538,15 +562,24 @@
       if (!drag) return;
       clearDropCue();
       if (drag.type === 'item') {
+        // Hovering a row of the same checked-state (any category): insert
+        // before/after it. Hovering elsewhere in a category section: append
+        // to the end of that category's matching section.
         const row = e.target.closest && e.target.closest('.item-row');
-        if (!row || +row.dataset.cat !== drag.catId) return;
-        if ((row.dataset.checked === '1') !== drag.checked) return;
-        if (+row.dataset.item === drag.id) { e.preventDefault(); return; }
+        if (row && (row.dataset.checked === '1') === drag.checked && +row.dataset.item !== drag.id) {
+          e.preventDefault();
+          const r = row.getBoundingClientRect();
+          const after = e.clientY > r.top + r.height / 2;
+          row.classList.add(after ? 'drop-after' : 'drop-before');
+          dropCue = { catId: +row.dataset.cat, id: +row.dataset.item, after };
+          return;
+        }
+        if (row && +row.dataset.item === drag.id) { e.preventDefault(); return; } // hovering itself
+        const sec = e.target.closest && e.target.closest('.cat-section');
+        if (!sec) return;
         e.preventDefault();
-        const r = row.getBoundingClientRect();
-        const after = e.clientY > r.top + r.height / 2;
-        row.classList.add(after ? 'drop-after' : 'drop-before');
-        dropCue = { id: +row.dataset.item, after };
+        sec.classList.add('drop-into');
+        dropCue = { catId: +sec.dataset.cat, end: true };
       } else {
         const sec = e.target.closest && e.target.closest('.cat-section');
         if (!sec) return;
@@ -577,22 +610,40 @@
       clearDropCue();
     });
 
+    // Handles both same-category reorders and cross-category moves. The item
+    // lands in the target category's matching checked/unchecked section, at
+    // the cue position (or the end for whole-section drops).
     async function applyItemReorder(d, cue) {
-      const ids = sectionItems(d.catId, d.checked).map(i => i.id);
-      const from = ids.indexOf(d.id);
-      if (from === -1) return;
-      ids.splice(from, 1);
-      let to = ids.indexOf(cue.id);
-      if (to === -1) return;
-      if (cue.after) to++;
+      const sameCat = cue.catId === d.catId;
+      const item = current.items.find(i => i.id === d.id);
+      if (!item) return;
+      const ids = sectionItems(cue.catId, d.checked).map(i => i.id).filter(id => id !== d.id);
+      let to;
+      if (cue.end || cue.id == null) {
+        to = ids.length;
+      } else {
+        to = ids.indexOf(cue.id);
+        if (to === -1) return;
+        if (cue.after) to++;
+      }
+      if (sameCat && cue.end) {
+        // No-op if it's already last in its section.
+        const before = sectionItems(d.catId, d.checked).map(i => i.id);
+        if (before[before.length - 1] === d.id) return;
+      }
       ids.splice(to, 0, d.id);
+      item.category_id = cue.catId;
       ids.forEach((id, idx) => {
         const it = current.items.find(i => i.id === id);
         if (it) it.sort_order = idx + 1;
       });
       repaintCategory(d.catId);
+      if (!sameCat) repaintCategory(cue.catId);
       try {
-        await api('/api/categories/' + d.catId + '/reorder-items', { method: 'POST', body: JSON.stringify({ itemIds: ids }) });
+        if (!sameCat) {
+          await api('/api/items/' + d.id, { method: 'PATCH', body: JSON.stringify({ category_id: cue.catId }) });
+        }
+        await api('/api/categories/' + cue.catId + '/reorder-items', { method: 'POST', body: JSON.stringify({ itemIds: ids }) });
       } catch (e) { toast(e.message); refreshList(); }
     }
 
@@ -611,6 +662,169 @@
       try {
         await api('/api/lists/' + current.list.id + '/reorder-categories', { method: 'POST', body: JSON.stringify({ categoryIds: ids }) });
       } catch (e) { toast(e.message); refreshList(); }
+    }
+
+    // --- markdown import / export ------------------------------------------------
+    // Google Keep-ish format: title as `# **Name**`, categories as top-level
+    // bullets, items as nested bullets. Active items come first; a `---`
+    // divider precedes the completed block, where items are ~~struck~~ and
+    // category names repeat (struck too when the category is fully done).
+
+    function buildMarkdown() {
+      const active = [], done = [];
+      for (const c of current.categories) {
+        const un = sectionItems(c.id, false);
+        const ch = sectionItems(c.id, true);
+        if (un.length || !ch.length) {
+          active.push('* ' + c.name);
+          un.forEach(i => active.push('  * ' + i.text));
+        }
+        if (ch.length) {
+          done.push('* ' + (un.length ? c.name : '~~' + c.name + '~~'));
+          ch.forEach(i => done.push('  * ~~' + i.text + '~~'));
+        }
+      }
+      const lines = ['# **' + current.list.name + '**', '', ...active];
+      if (done.length) lines.push('', '---', '', ...done);
+      return lines.join('\n') + '\n';
+    }
+
+    function stripMd(s) {
+      return s.replace(/\*\*/g, '').replace(/~~/g, '').trim();
+    }
+
+    function parseMarkdown(md) {
+      let name = null;
+      const categories = [];
+      const byKey = new Map(); // duplicate category names (active vs done block) merge
+      let cur = null;
+      for (const raw of md.split(/\r?\n/)) {
+        const line = raw.replace(/\s+$/, '');
+        if (!line.trim() || /^-{3,}$/.test(line.trim())) continue;
+        const h = line.match(/^#+\s+(.*)$/);
+        if (h) { if (!name) name = stripMd(h[1]); continue; }
+        const m = line.match(/^(\s*)[*+-]\s+(.*)$/);
+        if (!m) continue;
+        const indent = m[1].replace(/\t/g, '  ').length;
+        let text = m[2].trim();
+        let checked = false;
+        const struck = text.match(/^~~(.*)~~$/s);
+        if (struck) { checked = true; text = struck[1].trim(); }
+        text = text.replace(/\*\*/g, '').trim();
+        if (!text) continue;
+        if (indent === 0) {
+          const key = text.toLowerCase();
+          cur = byKey.get(key);
+          if (!cur) {
+            cur = { name: text, items: [] };
+            byKey.set(key, cur);
+            categories.push(cur);
+          }
+        } else {
+          if (!cur) {
+            cur = { name: 'General', items: [] };
+            byKey.set('general', cur);
+            categories.push(cur);
+          }
+          cur.items.push({ text, checked });
+        }
+      }
+      return { name, categories };
+    }
+
+    function openMd({ title, hint, text, readonly, actionsHtml }) {
+      document.getElementById('md-title').textContent = title;
+      document.getElementById('md-hint').textContent = hint;
+      const ta = document.getElementById('md-text');
+      ta.value = text;
+      ta.readOnly = !!readonly;
+      ta.placeholder = readonly ? '' : '# **My List**\n\n* Category\n  * item\n  * ~~done item~~';
+      document.getElementById('md-actions').innerHTML = actionsHtml;
+      document.getElementById('md-modal').classList.remove('hidden');
+      if (!readonly) setTimeout(() => ta.focus(), 0);
+    }
+    function closeMd() {
+      document.getElementById('md-modal').classList.add('hidden');
+    }
+    document.getElementById('md-modal').addEventListener('click', ev => {
+      if (ev.target === document.getElementById('md-modal')) closeMd();
+    });
+
+    function openExport() {
+      openMd({
+        title: 'Export markdown',
+        hint: 'Copy this markdown or download it as a file.',
+        text: buildMarkdown(),
+        readonly: true,
+        actionsHtml: `
+          <button onclick="copyMd()" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Copy</button>
+          <button onclick="downloadMd()" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Download .md</button>`,
+      });
+    }
+
+    async function copyMd() {
+      const ta = document.getElementById('md-text');
+      try {
+        await navigator.clipboard.writeText(ta.value);
+        toast('Copied to clipboard');
+      } catch (_) {
+        ta.select();
+        document.execCommand('copy');
+        toast('Copied to clipboard');
+      }
+    }
+
+    function downloadMd() {
+      const blob = new Blob([document.getElementById('md-text').value], { type: 'text/markdown' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (current ? current.list.name.replace(/[^\w\d-]+/g, '-').replace(/^-+|-+$/g, '') || 'list' : 'list') + '.md';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }
+
+    // mode 'new' (from Home: create a list) or 'merge' (fill the current list).
+    function openImport(mode) {
+      openMd({
+        title: 'Import markdown',
+        hint: mode === 'new'
+          ? 'Paste markdown to create a new list. ~~Strikethrough~~ items import as completed.'
+          : 'Paste markdown to add to this list. Categories with matching names merge; ~~strikethrough~~ items import as completed.',
+        text: '',
+        readonly: false,
+        actionsHtml: `
+          <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>
+          <button onclick="runImport('${mode}')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import</button>`,
+      });
+    }
+
+    async function runImport(mode) {
+      const md = document.getElementById('md-text').value;
+      const { name, categories } = parseMarkdown(md);
+      if (!categories.length || !categories.some(c => c.items.length)) {
+        return toast('Nothing to import — expected bullets like "* Category" with "  * item" beneath');
+      }
+      try {
+        if (mode === 'new') {
+          const { list } = await api('/api/lists/import', {
+            method: 'POST',
+            body: JSON.stringify({ name: name || 'Imported list', categories }),
+          });
+          closeMd();
+          if (location.hash === '#/list/' + list.id) loadList(list.id);
+          else location.hash = '#/list/' + list.id;
+        } else {
+          await api('/api/lists/' + current.list.id + '/import', {
+            method: 'POST',
+            body: JSON.stringify({ categories }),
+          });
+          closeMd();
+          toast('Imported');
+          refreshList();
+        }
+      } catch (e) { toast(e.message); }
     }
 
     // --- members modal ----------------------------------------------------------------

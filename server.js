@@ -203,6 +203,118 @@ app.delete('/api/lists/:id', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Markdown import — bulk-create categories/items from a parsed markdown
+// payload: [{ name, items: [{ text, checked }] }]. The client does the
+// parsing; these endpoints just validate and insert.
+// ---------------------------------------------------------------------------
+
+const MAX_IMPORT_CATS = 200;
+const MAX_IMPORT_ITEMS = 3000;
+
+function invalidImportPayload(categories) {
+  if (!Array.isArray(categories) || !categories.length) return 'categories must be a non-empty array';
+  if (categories.length > MAX_IMPORT_CATS) return `Too many categories (max ${MAX_IMPORT_CATS})`;
+  let count = 0;
+  for (const c of categories) {
+    if (!c || typeof c.name !== 'string' || !c.name.trim()) return 'Every category needs a name';
+    if (!Array.isArray(c.items)) return 'Every category needs an items array';
+    for (const it of c.items) {
+      if (!it || typeof it.text !== 'string' || !it.text.trim()) return 'Every item needs text';
+      count++;
+    }
+  }
+  if (count > MAX_IMPORT_ITEMS) return `Too many items (max ${MAX_IMPORT_ITEMS})`;
+  return null;
+}
+
+// Inserts imported categories/items into a list. Category names are matched
+// case-insensitively against existing categories (so repeated names across
+// the markdown's active/completed blocks merge); new items append to the end
+// of the matching checked/unchecked section.
+async function importCategoriesInto(client, listId, categories, username) {
+  const { rows: existing } = await client.query(
+    `SELECT id, name FROM categories WHERE list_id = $1`, [listId]);
+  const byName = new Map(existing.map(c => [c.name.trim().toLowerCase(), c.id]));
+  let catSort = Number((await client.query(
+    `SELECT COALESCE(MAX(sort_order), 0) AS max FROM categories WHERE list_id = $1`, [listId]
+  )).rows[0].max);
+
+  for (const c of categories) {
+    const key = c.name.trim().toLowerCase();
+    let catId = byName.get(key);
+    if (!catId) {
+      catSort++;
+      const r = await client.query(
+        `INSERT INTO categories (list_id, name, is_default, sort_order)
+         VALUES ($1, $2, FALSE, $3) RETURNING id`,
+        [listId, c.name.trim(), catSort]);
+      catId = r.rows[0].id;
+      byName.set(key, catId);
+    }
+    const counters = {};
+    for (const checked of [false, true]) {
+      counters[checked] = Number((await client.query(
+        `SELECT COALESCE(MAX(sort_order), 0) AS max FROM items WHERE category_id = $1 AND checked = $2`,
+        [catId, checked])).rows[0].max);
+    }
+    for (const it of c.items) {
+      const checked = !!it.checked;
+      counters[checked]++;
+      await client.query(
+        `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by)
+         VALUES ($1, $2, $3, $4, CASE WHEN $3 THEN NOW() ELSE NULL END, $5,
+                 CASE WHEN $3 THEN $5 ELSE NULL END)`,
+        [catId, it.text.trim(), checked, counters[checked], username]);
+    }
+  }
+}
+
+// Create a brand-new list from imported markdown.
+app.post('/api/lists/import', async (req, res) => {
+  const name = (req.body.name || '').trim() || 'Imported list';
+  const badPayload = invalidImportPayload(req.body.categories);
+  if (badPayload) return res.status(400).json({ error: badPayload });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING *`,
+      [name, req.user.id, req.user.username]);
+    await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0)`,
+      [rows[0].id]);
+    await importCategoriesInto(client, rows[0].id, req.body.categories, req.user.username);
+    await client.query('COMMIT');
+    res.json({ list: rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Import markdown into an existing list (owner or member).
+app.post('/api/lists/:id/import', async (req, res) => {
+  const badPayload = invalidImportPayload(req.body.categories);
+  if (badPayload) return res.status(400).json({ error: badPayload });
+  const client = await pool.connect();
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+    await client.query('BEGIN');
+    await importCategoriesInto(client, list.id, req.body.categories, req.user.username);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Members (owner only; invites take effect immediately)
 // ---------------------------------------------------------------------------
 
@@ -387,9 +499,10 @@ app.post('/api/categories/:id/items', async (req, res) => {
   }
 });
 
-// Edit text and/or toggle checked. Checking moves the item to the bottom of
-// the checked section of its category; unchecking moves it to the bottom of
-// the unchecked section.
+// Edit text, move to another category, and/or toggle checked. Checking moves
+// the item to the bottom of the checked section of its category; unchecking
+// moves it to the bottom of the unchecked section. A category move drops the
+// item at the end of the matching section of the target category.
 app.patch('/api/items/:id', async (req, res) => {
   try {
     const { item, role } = await getItemAccess(req.params.id, req.user);
@@ -401,6 +514,26 @@ app.patch('/api/items/:id', async (req, res) => {
       await pool.query(`UPDATE items SET text = $1 WHERE id = $2`, [text, item.id]);
     }
 
+    let categoryId = item.category_id;
+    if (Number.isInteger(req.body.category_id) && req.body.category_id !== item.category_id) {
+      // The target must belong to the same list as the item's current category.
+      const { rows: target } = await pool.query(
+        `SELECT c2.id FROM categories c2 JOIN categories c1 ON c1.list_id = c2.list_id
+          WHERE c2.id = $1 AND c1.id = $2`,
+        [req.body.category_id, item.category_id]
+      );
+      if (!target.length) return res.status(400).json({ error: 'Target category not found in this list' });
+      await pool.query(
+        `UPDATE items SET
+           category_id = $1,
+           sort_order = COALESCE((SELECT MAX(sort_order) FROM items
+                                   WHERE category_id = $1 AND checked = $2), 0) + 1
+         WHERE id = $3`,
+        [target[0].id, item.checked, item.id]
+      );
+      categoryId = target[0].id;
+    }
+
     if (typeof req.body.checked === 'boolean' && req.body.checked !== item.checked) {
       await pool.query(
         `UPDATE items SET
@@ -410,7 +543,7 @@ app.patch('/api/items/:id', async (req, res) => {
            sort_order = COALESCE((SELECT MAX(sort_order) FROM items
                                    WHERE category_id = $2 AND checked = $1 AND id <> $3), 0) + 1
          WHERE id = $3`,
-        [req.body.checked, item.category_id, item.id, req.user.username]
+        [req.body.checked, categoryId, item.id, req.user.username]
       );
     }
 
