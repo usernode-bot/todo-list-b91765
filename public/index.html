@@ -308,14 +308,35 @@
       // The global switch resets any per-category overrides so flipping it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
+      // Fully-completed categories default to collapsed, so "Show all done"
+      // gives them an explicit override — otherwise they'd stay shut.
+      if (v && current) {
+        for (const c of current.categories) {
+          if (isCatFullyDone(c.id)) catDoneOverrides[c.id] = true;
+        }
+      }
       if (current) repaintAllCategories();
     }
 
+    // A category with at least one item and nothing left unchecked.
+    function isCatFullyDone(catId) {
+      if (!current) return false;
+      let open = 0, done = 0;
+      for (const i of current.items) {
+        if (i.category_id !== catId) continue;
+        if (i.checked) done++; else open++;
+      }
+      return !open && done > 0;
+    }
+
     // Per-category visibility of completed items (session-only override of the
-    // global switch), toggled from the divider between active and done items.
+    // global switch), toggled from the divider between active and done items
+    // (or, for fully-completed categories, from the header row).
     const catDoneOverrides = {};
     function catShowDone(catId) {
-      return catDoneOverrides[catId] !== undefined ? catDoneOverrides[catId] : showCompleted();
+      if (catDoneOverrides[catId] !== undefined) return catDoneOverrides[catId];
+      if (isCatFullyDone(catId)) return false; // finished categories collapse by default
+      return showCompleted();
     }
     function toggleCatDone(catId) {
       catDoneOverrides[catId] = !catShowDone(catId);
@@ -549,7 +570,7 @@
           </div>
         </header>
 
-        <div id="cats" class="space-y-7">
+        <div id="cats">
           ${displayCategories().map(c => renderCategory(c)).join('')}
         </div>
 
@@ -583,18 +604,29 @@
       const unchecked = sectionItems(c.id, false);
       const checked = sectionItems(c.id, true);
       const empty = !unchecked.length && !checked.length;
+      const fullyDone = !unchecked.length && checked.length > 0;
+      // Top margin lives on the section (not a space-y on #cats) so a
+      // repaintCategory outerHTML swap keeps it correct when the category's
+      // completion state changes in place.
+      const idx = displayCategories().findIndex(x => x.id === c.id);
+      const topGap = idx > 0 ? (fullyDone ? ' mt-3' : ' mt-7') : '';
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
-        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section">
-          <div class="swipe-wrap relative overflow-hidden mb-1">
+        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section${topGap}">
+          <div class="swipe-wrap relative overflow-hidden ${fullyDone ? 'mb-0.5' : 'mb-1'}">
             <div class="swipe-actions absolute inset-y-0 right-0 flex">
               <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
               <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
             </div>
-            <div class="swipe-front cat-head flex items-center gap-1.5 pb-1.5 border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+            <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-              <h2 class="font-semibold text-sm uppercase tracking-wide text-zinc-500 dark:text-zinc-400 flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+              <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
                   onclick="catTitleTap(event, ${c.id})" title="Rename category">${esc(c.name)}</h2>
+              ${fullyDone ? `
+              <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
+                      class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
+                ${checked.length} done ${showDone ? '▾' : '▸'}
+              </button>` : ''}
               <button onclick="toggleAdder(${c.id})" title="Add an item"
                       class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
               <button onclick="deleteCategory(${c.id})" title="Delete category"
@@ -613,6 +645,7 @@
             ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           ${checked.length ? `
+          ${fullyDone ? '' : `
           <div class="flex items-center justify-start gap-2 my-1.5 px-1">
             <div class="${hairline}"></div>
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
@@ -620,7 +653,7 @@
               ${checked.length} done ${showDone ? '▾' : '▸'}
             </button>
             <div class="${hairline}"></div>
-          </div>
+          </div>`}
           ${showDone ? `<div class="space-y-0.5">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
         </section>`;
     }
@@ -757,16 +790,26 @@
       const text = input.value.trim();
       if (!text) return false;
       input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
+      const wasFullyDone = isCatFullyDone(categoryId);
       try {
         const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
         current.items.push(item); // server gives it the smallest sort_order → top of the active list
-        // Insert just the new row; the form (and its focus) is untouched,
-        // so the view stays perfectly still.
-        const body = document.querySelector('#cat-' + categoryId + ' .active-items');
-        if (body) {
-          const ph = body.querySelector('.empty-note');
-          if (ph) ph.remove();
-          body.insertAdjacentHTML('afterbegin', renderItem(item));
+        if (wasFullyDone) {
+          // The section was rendered compact (inline done toggle, tight
+          // spacing) and is now active again — a surgical insert would leave
+          // that stale, so repaint the whole section and restore focus.
+          repaintCategory(categoryId);
+          const fresh = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+          if (fresh) fresh.focus({ preventScroll: true });
+        } else {
+          // Insert just the new row; the form (and its focus) is untouched,
+          // so the view stays perfectly still.
+          const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+          if (body) {
+            const ph = body.querySelector('.empty-note');
+            if (ph) ph.remove();
+            body.insertAdjacentHTML('afterbegin', renderItem(item));
+          }
         }
       } catch (e) { toast(e.message); input.value = text; }
       return false;
@@ -777,6 +820,10 @@
         const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
+        // Checking the last open item flips the category to fully done, which
+        // defaults to collapsed — keep it expanded for this session so the
+        // rows the user is looking at don't vanish mid-interaction.
+        if (checked && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
         repaintCategory(item.category_id);
       } catch (e) { toast(e.message); refreshList(); }
     }
