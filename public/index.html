@@ -925,12 +925,71 @@
       dropCue = null;
     }
 
+    // Deadspace fallback: when the pointer isn't over any row or section
+    // (gaps between categories, header, padding, beside the column), snap
+    // to the nearest valid drop position by vertical distance and paint
+    // the same cue a direct hover there would have painted. Vertical-only —
+    // the layout is a single centered column, so horizontal distance
+    // carries no information. Ties break by document order.
+    function nearestDropCue(clientY) {
+      if (!drag) { clearDropCue(); return false; }
+      const distTo = r =>
+        clientY < r.top ? r.top - clientY : clientY > r.bottom ? clientY - r.bottom : 0;
+      let best = null, bestDist = Infinity;
+      if (drag.type === 'item') {
+        // Nearest visible row of the matching checked-state, any category.
+        document.querySelectorAll('.item-row').forEach(row => {
+          if (+row.dataset.item === drag.id) return;
+          if ((row.dataset.checked === '1') !== drag.checked) return;
+          if (!row.offsetParent) return;
+          const r = row.getBoundingClientRect();
+          const d = distTo(r);
+          if (d < bestDist) { bestDist = d; best = { row, r }; }
+        });
+        // Sections whose matching subsection has no visible rows (empty
+        // categories, collapsed done-subsections) are end-drop targets.
+        document.querySelectorAll('.cat-section').forEach(sec => {
+          const hasRow = Array.from(sec.querySelectorAll('.item-row')).some(row =>
+            +row.dataset.item !== drag.id &&
+            (row.dataset.checked === '1') === drag.checked && row.offsetParent);
+          if (hasRow) return;
+          const d = distTo(sec.getBoundingClientRect());
+          if (d < bestDist) { bestDist = d; best = { sec } }
+        });
+        if (!best) { clearDropCue(); return false; }
+        clearDropCue();
+        if (best.row) {
+          const after = clientY > best.r.top + best.r.height / 2;
+          (best.row.closest('.swipe-wrap') || best.row).classList.add(after ? 'drop-after' : 'drop-before');
+          dropCue = { catId: +best.row.dataset.cat, id: +best.row.dataset.item, after };
+        } else {
+          best.sec.classList.add('drop-into');
+          dropCue = { catId: +best.sec.dataset.cat, end: true };
+        }
+        return true;
+      } else {
+        document.querySelectorAll('.cat-section').forEach(sec => {
+          if (+sec.dataset.cat === drag.id) return;
+          const r = sec.getBoundingClientRect();
+          const d = distTo(r);
+          if (d < bestDist) { bestDist = d; best = { sec, r }; }
+        });
+        if (!best) { clearDropCue(); return false; }
+        clearDropCue();
+        const after = clientY > best.r.top + best.r.height / 2;
+        best.sec.classList.add(after ? 'drop-after' : 'drop-before');
+        dropCue = { id: +best.sec.dataset.cat, after };
+        return true;
+      }
+    }
+
     // Shared by desktop dragover and touch (long-press) drag. Computes the
     // drop cue for the element under the pointer; returns true when that
     // position is a valid drop target. Row cues paint on the swipe wrapper —
     // the row itself sits inside overflow-hidden, which clips box-shadows.
     function cueFromPoint(targetEl, clientY) {
-      if (!drag || !targetEl || !targetEl.closest) { clearDropCue(); return false; }
+      if (!drag) { clearDropCue(); return false; }
+      if (!targetEl || !targetEl.closest) return nearestDropCue(clientY);
       if (drag.type === 'item') {
         // Over a row of the same checked-state (any category): insert
         // before/after it. Elsewhere in a category section: append to the
@@ -947,13 +1006,13 @@
           return true;
         }
         const sec = targetEl.closest('.cat-section');
-        if (!sec) return false;
+        if (!sec) return nearestDropCue(clientY);
         sec.classList.add('drop-into');
         dropCue = { catId: +sec.dataset.cat, end: true };
         return true;
       } else {
         const sec = targetEl.closest('.cat-section');
-        if (!sec) { clearDropCue(); return false; }
+        if (!sec) return nearestDropCue(clientY);
         // Over the dragged section itself (it's tall — this is the common
         // case mid-drag): keep the last cue instead of wiping it.
         if (+sec.dataset.cat === drag.id) return true;
@@ -966,13 +1025,17 @@
       }
     }
 
-    appEl.addEventListener('dragover', e => {
+    // Bound to document (not #app) so deadspace outside the centered
+    // column — body margins, header, bottom padding — still snaps to the
+    // nearest drop position. The `drag` guard keeps foreign drags
+    // (files, text) untouched.
+    document.addEventListener('dragover', e => {
       if (!drag) return;
       dragX = e.clientX; dragY = e.clientY;
       if (cueFromPoint(e.target, e.clientY)) e.preventDefault();
     });
 
-    appEl.addEventListener('drop', e => {
+    document.addEventListener('drop', e => {
       if (!drag) return;
       e.preventDefault();
       stopAutoScroll();
