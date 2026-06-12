@@ -630,7 +630,7 @@
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed items in this category"
                       class="text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none text-[10px] px-0.5 leading-none w-3 shrink-0">
-                ${showDone ? '▾' : '▶'}
+                ${showDone ? '▾' : '▸'}
               </button>
               <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
                   onclick="catTitleTap(event, ${c.id})" title="${IS_TOUCH ? (showDone ? 'Hide' : 'Show') + ' completed items' : 'Rename category'}">${esc(c.name)}</h2>
