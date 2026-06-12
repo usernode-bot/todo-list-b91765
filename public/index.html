@@ -333,6 +333,14 @@
     // global switch), toggled from the divider between active and done items
     // (or, for fully-completed categories, from the header row).
     const catDoneOverrides = {};
+
+    // Per-category collapsed state (all start expanded).
+    const catCollapsed = new Set();
+    function toggleCatCollapse(id) {
+      if (catCollapsed.has(id)) catCollapsed.delete(id);
+      else catCollapsed.add(id);
+      repaintCategory(id);
+    }
     function catShowDone(catId) {
       if (catDoneOverrides[catId] !== undefined) return catDoneOverrides[catId];
       if (isCatFullyDone(catId)) return false; // finished categories collapse by default
@@ -360,8 +368,11 @@
     }
 
     function toggleAdder(catId) {
+      const opening = !openAdders.has(catId);
       if (openAdders.has(catId)) openAdders.delete(catId);
       else openAdders.add(catId);
+      // Opening the adder on a collapsed category auto-expands it.
+      if (opening && catCollapsed.has(catId)) catCollapsed.delete(catId);
       repaintCategory(catId);
       if (openAdders.has(catId)) {
         const input = document.querySelector('#cat-' + catId + ' input[name=text]');
@@ -601,6 +612,7 @@
 
     function renderCategory(c) {
       const showDone = catShowDone(c.id);
+      const collapsed = catCollapsed.has(c.id);
       const unchecked = sectionItems(c.id, false);
       const checked = sectionItems(c.id, true);
       const empty = !unchecked.length && !checked.length;
@@ -613,16 +625,20 @@
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section${topGap}">
-          <div class="swipe-wrap relative overflow-hidden ${fullyDone ? 'mb-0.5' : 'mb-1'}">
+          <div class="swipe-wrap relative overflow-hidden ${fullyDone && !collapsed ? 'mb-0.5' : 'mb-1'}">
             <div class="swipe-actions absolute inset-y-0 right-0 flex">
               <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
               <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
             </div>
-            <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+            <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone && !collapsed ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
-              <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
-                  onclick="catTitleTap(event, ${c.id})" title="Rename category">${esc(c.name)}</h2>
-              ${fullyDone ? `
+              <button onclick="toggleCatCollapse(${c.id})" title="${collapsed ? 'Expand' : 'Collapse'} category"
+                      class="text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none text-[10px] px-0.5 leading-none w-3 shrink-0">
+                ${collapsed ? '▶' : '▾'}
+              </button>
+              <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone && !collapsed ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                  onclick="catTitleTap(event, ${c.id})" title="${IS_TOUCH ? (collapsed ? 'Expand' : 'Collapse') : 'Rename'} category">${esc(c.name)}</h2>
+              ${fullyDone && !collapsed ? `
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                       class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
                 ${checked.length} done ${showDone ? '▾' : '▸'}
@@ -633,6 +649,7 @@
                       class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
             </div>
           </div>
+          ${!collapsed ? `
           ${openAdders.has(c.id) ? `
           <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
             <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
@@ -655,6 +672,7 @@
             <div class="${hairline}"></div>
           </div>`}
           ${showDone ? `<div class="space-y-0.5">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
+          ` : ''}
         </section>`;
     }
 
@@ -670,12 +688,12 @@
       if (item) toggleItem(id, !item.checked);
     }
 
-    // On touch devices renaming goes through the swipe actions, so a tap on
-    // the title shouldn't open the rename dialog.
+    // On touch devices renaming goes through the swipe actions; a tap on the
+    // title toggles expand/collapse instead.
     function catTitleTap(ev, id) {
       if (suppressTap) return;
       if (openSwipe) { closeOpenSwipe(); return; }
-      if (IS_TOUCH) return;
+      if (IS_TOUCH) { toggleCatCollapse(id); return; }
       renameCategory(id);
     }
 
