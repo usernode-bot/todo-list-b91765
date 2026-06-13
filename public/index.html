@@ -209,6 +209,11 @@
     const BTN_SOFT = 'bg-zinc-200 hover:bg-zinc-300 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-300';
     const DRAWER_ITEM = 'w-full text-left px-3.5 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800';
 
+    // Closed-padlock icon marking private (owner-only) lists; inherits text color.
+    function lockSvg(size) {
+      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="inline-block shrink-0"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
+    }
+
     // Promise-based replacements for prompt()/confirm(), plus a multi-choice
     // mode.
     let dialogResolve = null;
@@ -462,7 +467,9 @@
             <div class="flex items-center justify-between gap-2">
               <span class="font-medium truncate">${esc(l.name)}</span>
               ${l.is_owner
-                ? '<span class="shrink-0 text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400 bg-violet-600/10 dark:bg-violet-600/15 px-1.5 py-0.5 rounded">Owner</span>'
+                ? (Number(l.member_count) === 0
+                  ? '<span title="Private — only you can see this list" class="shrink-0 inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-300/60 dark:bg-zinc-700/40 px-1.5 py-0.5 rounded">' + lockSvg(10) + 'Private</span>'
+                  : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400 bg-violet-600/10 dark:bg-violet-600/15 px-1.5 py-0.5 rounded">Owner</span>')
                 : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-300/60 dark:bg-zinc-700/40 px-1.5 py-0.5 rounded">Shared</span>'}
             </div>
             <div class="text-xs text-zinc-500 mt-1">
@@ -555,10 +562,15 @@
           <a href="#/" class="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
           <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-600 dark:hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
               ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-400 dark:text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
+          ${d.members.length === 0 ? `
+          <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
+                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 inline-flex items-center gap-1.5">
+            ${lockSvg(12)} Private
+          </button>` : `
           <button onclick="openMembers()" title="Members"
                   class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300">
             👥 ${1 + d.members.length}
-          </button>
+          </button>`}
           <div id="drawer-wrap" class="relative shrink-0">
             <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu"
                     class="px-2.5 py-[7px] rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
@@ -1464,7 +1476,7 @@
               <span class="text-sm">@${esc(m.username)}</span>
               ${isOwner ? `<button onclick="removeMember(${m.id})" class="text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs">Remove</button>` : ''}
             </div>`).join('')}
-          ${!current.members.length ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-2 py-1">No members yet</p>' : ''}
+          ${!current.members.length ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-2 py-1 flex items-center gap-1.5">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
         </div>
         ${isOwner ? `
           <form onsubmit="return inviteMember(event)" class="flex gap-2">
