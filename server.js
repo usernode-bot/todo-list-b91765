@@ -636,6 +636,13 @@ app.delete('/api/items/:id', async (req, res) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Browsers request /favicon.ico unconditionally (no token attached). Without
+// this route it falls through to the auth-gated catch-all below and logs a
+// 401 in the console. An icon reveals nothing, so serve it openly.
+app.get('/favicon.ico', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'favicon.svg'));
+});
+
 // HTML shell: serve the app if authenticated, otherwise an "open in Usernode"
 // landing page so stray visits to the staging URL don't reveal the app.
 app.get('*', (req, res) => {
