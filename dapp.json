@@ -1,3 +1,6 @@
 {
-  "secrets": []
+  "secrets": [],
+  "tests": [
+    { "name": "App shell loads", "path": "/", "expectSelector": "#app" }
+  ]
 }

@@ -349,6 +349,9 @@
       return showCompleted();
     }
     function toggleCatDone(catId) {
+      // While a search is active, done-visibility is forced by the filter;
+      // toggling would silently mutate the collapse state behind the search.
+      if (searchActive()) return;
       catDoneOverrides[catId] = !catShowDone(catId);
       repaintCategory(catId);
     }
@@ -356,6 +359,14 @@
     // Categories whose "Add an item…" input is currently revealed by the
     // header + button.
     const openAdders = new Set();
+
+    // --- search (list view) ---------------------------------------------------
+    // Live client-side filter over the open list — all items are already in
+    // `current`, so each keystroke just re-renders #cats from memory.
+    // Whitespace-only input counts as inactive.
+    let searchQuery = '';
+    const searchActive = () => !!searchQuery.trim();
+    const searchQ = () => searchQuery.trim().toLowerCase();
 
     // The mobile keyboard's check/done key dismisses the keyboard (a blur)
     // without submitting. On touch devices, accept whatever was typed when
@@ -495,6 +506,7 @@
 
     // --- List View --------------------------------------------------------------
     async function loadList(id) {
+      searchQuery = ''; // a freshly opened list always starts unfiltered
       const app = document.getElementById('app');
       app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
       try {
@@ -523,7 +535,9 @@
         const ae = document.activeElement;
         let focus = null;
         if (ae && ae.tagName === 'INPUT') {
-          if (ae.name === 'text' && ae.closest('.cat-section')) {
+          if (ae.id === 'search-input') {
+            focus = { sel: '#search-input', value: ae.value, pos: ae.selectionStart };
+          } else if (ae.name === 'text' && ae.closest('.cat-section')) {
             focus = { sel: '#cat-' + ae.closest('.cat-section').dataset.cat + ' input[name=text]', value: ae.value, pos: ae.selectionStart };
           } else if (ae.name === 'name') {
             focus = { sel: 'input[name=name]', value: ae.value, pos: ae.selectionStart };
@@ -552,6 +566,16 @@
     // Categories never move around based on whether their items are done.
     function displayCategories() {
       return current.categories;
+    }
+
+    // #cats body: all categories, or a single "no matches" note when an
+    // active search filters every one of them out.
+    function renderCats() {
+      const html = displayCategories().map(c => renderCategory(c)).join('');
+      if (!html && searchActive()) {
+        return `<p class="text-sm text-zinc-500 py-8 text-center">No items match "${esc(searchQuery.trim())}"</p>`;
+      }
+      return html;
     }
 
     function renderList(d) {
@@ -590,11 +614,23 @@
           </div>
         </header>
 
-        <div id="cats">
-          ${displayCategories().map(c => renderCategory(c)).join('')}
+        <div class="relative mb-4">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+               class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-600 pointer-events-none"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="search-input" type="text" autocomplete="off" enterkeyhint="search" placeholder="Search items…"
+                 value="${esc(searchQuery)}"
+                 oninput="onSearchInput(this.value)"
+                 onkeydown="if (event.key === 'Escape') clearSearch()"
+                 class="w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl pl-9 pr-9 py-2 text-sm text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+          <button id="search-clear" onclick="clearSearch()" title="Clear search" aria-label="Clear search"
+                  class="${searchQuery ? '' : 'hidden '}absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-sm px-1.5 py-0.5 leading-none">✕</button>
         </div>
 
-        <form onsubmit="return addCategory(event)" class="mt-7 flex items-center gap-1.5 px-0.5">
+        <div id="cats">
+          ${renderCats()}
+        </div>
+
+        <form id="new-cat-form" onsubmit="return addCategory(event)" class="${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-1.5 px-0.5">
           <span class="text-zinc-400 dark:text-zinc-600 text-sm select-none">+</span>
           <input name="name" placeholder="New category…" autocomplete="off" enterkeyhint="done"
                  onblur="commitOnBlur(event)"
@@ -620,9 +656,22 @@
     });
 
     function renderCategory(c) {
-      const showDone = catShowDone(c.id);
-      const unchecked = sectionItems(c.id, false);
-      const checked = sectionItems(c.id, true);
+      // Active search: a matching category name shows all its items; otherwise
+      // both sections filter to matching item text, and a category with no
+      // matches disappears. Matching done items always render (bypassing
+      // catShowDone) without touching catDoneOverrides, so clearing the search
+      // restores the collapse state exactly.
+      const searching = searchActive();
+      const q = searchQ();
+      const catMatches = searching && c.name.toLowerCase().includes(q);
+      let unchecked = sectionItems(c.id, false);
+      let checked = sectionItems(c.id, true);
+      if (searching && !catMatches) {
+        unchecked = unchecked.filter(i => i.text.toLowerCase().includes(q));
+        checked = checked.filter(i => i.text.toLowerCase().includes(q));
+        if (!unchecked.length && !checked.length) return '';
+      }
+      const showDone = searching ? checked.length > 0 : catShowDone(c.id);
       const empty = !unchecked.length && !checked.length;
       const fullyDone = !unchecked.length && checked.length > 0;
       // Top margin lives on the section (not a space-y on #cats) so a
@@ -632,32 +681,34 @@
       const topGap = idx > 0 ? (fullyDone ? ' mt-3' : ' mt-7') : '';
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
-        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH ? 'false' : 'true'}" class="cat-section${topGap}">
+        <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH || searching ? 'false' : 'true'}" class="cat-section${topGap}">
           <div class="swipe-wrap relative overflow-hidden ${fullyDone ? 'mb-0.5' : 'mb-1'}">
             <div class="swipe-actions absolute inset-y-0 right-0 flex">
               <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
               <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
             </div>
             <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+              ${searching ? '' : `
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed items in this category"
                       class="text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none text-[10px] px-0.5 leading-none w-3 shrink-0">
                 ${showDone ? '▼' : '▶'}
-              </button>
+              </button>`}
               <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
                   onclick="catTitleTap(event, ${c.id})" title="${IS_TOUCH ? (showDone ? 'Hide' : 'Show') + ' completed items' : 'Rename category'}">${esc(c.name)}</h2>
-              ${fullyDone ? `
+              ${fullyDone && !searching ? `
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                       class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
                 ${checked.length} done ${showDone ? '▾' : '▸'}
               </button>` : ''}
+              ${searching ? '' : `
               <button onclick="toggleAdder(${c.id})" title="Add an item"
-                      class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>
+                      class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>`}
               <button onclick="deleteCategory(${c.id})" title="Delete category"
                       class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
             </div>
           </div>
-          ${openAdders.has(c.id) ? `
+          ${openAdders.has(c.id) && !searching ? `
           <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
             <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
             <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
@@ -669,7 +720,7 @@
             ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
           ${checked.length ? `
-          ${fullyDone ? '' : `
+          ${fullyDone || searching ? '' : `
           <div class="flex items-center justify-start gap-2 my-1.5 px-1">
             <div class="${hairline}"></div>
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
@@ -711,9 +762,9 @@
             <button onclick="deleteItem(${i.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
           </div>
           <div class="swipe-front item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
-               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH ? 'false' : 'true'}"
+               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH || searchActive() ? 'false' : 'true'}"
                onclick="rowTap(event, ${i.id})">
-            <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>
+            ${searchActive() ? '' : `<span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>`}
             <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
                    class="todo-check">
             <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
@@ -729,6 +780,9 @@
     // Targeted repaints — swap just the affected category section so the rest
     // of the screen (and input focus elsewhere) is untouched.
     function repaintCategory(catId) {
+      // Mid-search an edit can hide the category entirely or leave zero
+      // matches overall (the "No items match" note), so repaint everything.
+      if (searchActive()) return repaintAllCategories();
       const c = current.categories.find(x => x.id === catId);
       const el = document.getElementById('cat-' + catId);
       if (!c || !el) return;
@@ -738,7 +792,32 @@
     function repaintAllCategories() {
       const el = document.getElementById('cats');
       openSwipe = null;
-      if (el) el.innerHTML = displayCategories().map(c => renderCategory(c)).join('');
+      if (el) el.innerHTML = renderCats();
+    }
+
+    // --- search handlers -------------------------------------------------------
+    // The input lives outside #cats, so these repaints never touch it and
+    // focus survives typing naturally.
+    function onSearchInput(v) {
+      searchQuery = v;
+      syncSearchChrome();
+      repaintAllCategories();
+    }
+    function clearSearch() {
+      if (!searchQuery) return;
+      searchQuery = '';
+      const input = document.getElementById('search-input');
+      if (input) { input.value = ''; input.focus({ preventScroll: true }); }
+      syncSearchChrome();
+      repaintAllCategories();
+    }
+    // Bits outside #cats that depend on the query: the ✕ clear button and the
+    // "New category…" form (hidden while filtering).
+    function syncSearchChrome() {
+      const btn = document.getElementById('search-clear');
+      if (btn) btn.classList.toggle('hidden', !searchQuery);
+      const form = document.getElementById('new-cat-form');
+      if (form) form.classList.toggle('hidden', searchActive());
     }
 
     // --- list actions ------------------------------------------------------------
@@ -927,7 +1006,9 @@
     }
 
     appEl.addEventListener('dragstart', e => {
-      if (!handleArmed || !current) { e.preventDefault(); return; }
+      // No reordering while filtered: the visible order no longer matches
+      // sectionItems(), so a drop would compute wrong positions.
+      if (!handleArmed || !current || searchActive()) { e.preventDefault(); return; }
       const row = e.target.closest && e.target.closest('.item-row');
       const sec = e.target.closest && e.target.closest('.cat-section');
       if (row) {
@@ -1138,7 +1219,7 @@
         const sec = head.closest('.cat-section');
         if (sec) info = { type: 'cat', id: +sec.dataset.cat, el: sec };
       }
-      if (info) {
+      if (info && !searchActive()) { // long-press drag is disabled while filtered too
         lpTimer = setTimeout(() => {
           if (swipe && swipe.mode) return; // already swiping/scrolling
           touchDragging = true;
