@@ -1,6 +1,9 @@
 {
   "icon": { "emoji": "📝" },
   "secrets": [],
+  "tests": [
+    { "name": "App shell loads", "path": "/", "expectSelector": "#app" }
+  ],
   "visibility": {
     "build": "private",
     "view": "public"
