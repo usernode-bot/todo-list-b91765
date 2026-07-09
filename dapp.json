@@ -1,4 +1,8 @@
 {
   "icon": { "emoji": "📝" },
-  "secrets": []
+  "secrets": [],
+  "visibility": {
+    "build": "private",
+    "view": "public"
+  }
 }
