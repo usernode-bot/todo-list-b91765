@@ -920,14 +920,19 @@
     }
 
     async function toggleItem(id, checked) {
+      // Capture done-visibility before the mutation: checking the last open
+      // item flips the category to fully done, which defaults to collapsed.
+      const before = current.items.find(i => i.id === id);
+      const wasShowingDone = before ? catShowDone(before.category_id) : false;
       try {
         const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
-        // Checking the last open item flips the category to fully done, which
-        // defaults to collapsed — keep it expanded for this session so the
-        // rows the user is looking at don't vanish mid-interaction.
-        if (checked && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
+        // Keep a newly fully-done category expanded only if its done items
+        // were already visible, so the rows the user is looking at don't
+        // vanish mid-interaction. A category the user had collapsed stays
+        // collapsed — checking its last item must not pop it open.
+        if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
         repaintCategory(item.category_id);
       } catch (e) { toast(e.message); refreshList(); }
     }
