@@ -2,7 +2,8 @@
   "icon": { "emoji": "📝" },
   "secrets": [],
   "tests": [
-    { "name": "App shell loads", "path": "/", "expectSelector": "#app" }
+    { "name": "App shell loads", "path": "/", "expectSelector": "#app" },
+    { "name": "Shared list counts the owner in its member count", "path": "/", "expectText": "2 members" }
   ],
   "visibility": {
     "build": "private",

@@ -270,6 +270,11 @@
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    // Owner-inclusive people count with singular/plural wording.
+    function memberLabel(total) {
+      return total + ' member' + (total === 1 ? '' : 's');
+    }
+
     // --- theme (light / dark / system) ----------------------------------------
     const THEME_KEY = 'todo:theme';
     function themePref() {
@@ -486,7 +491,7 @@
             </div>
             <div class="text-xs text-zinc-500 mt-1">
               ${l.open_count} open · ${l.done_count} done
-              ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + l.member_count + ' member' + (Number(l.member_count) > 1 ? 's' : '') : '')}
+              ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + memberLabel(Number(l.member_count) + 1) : '')}
             </div>
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16 text-zinc-500">
