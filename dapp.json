@@ -2,7 +2,8 @@
   "icon": { "emoji": "📝" },
   "secrets": [],
   "tests": [
-    { "name": "App shell loads", "path": "/", "expectSelector": "#app" }
+    { "name": "App shell loads", "path": "/", "expectSelector": "#app" },
+    { "name": "Native UI kit loads", "path": "/", "expectSelector": "link[href*='usernode-native']" }
   ],
   "visibility": {
     "build": "private",
