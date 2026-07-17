@@ -67,8 +67,6 @@
   <title>Todo List</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
-  <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
     // localStorage wins; otherwise follow the system preference.
@@ -82,25 +80,23 @@
     })();
   </script>
   <style>
-    /* usernode-native theming — route the kit's chrome (switches, swipe-action
-       buttons, pull-to-refresh puck) through the app's violet/zinc palette.
-       Gesture physics are deliberately not themeable. */
-    :root {
-      --un-accent: #7c3aed;            /* violet-600 */
-      --un-accent-contrast: #ffffff;
-      --un-action-danger: #ef4444;     /* red-500 — matches the old Delete button */
-      --un-action-neutral: #71717a;    /* zinc-500 — matches the old Rename button */
-      --un-action-text: #ffffff;
-      --un-surface: #f4f4f5;           /* zinc-100 */
-    }
-    .dark { --un-surface: #09090b; }   /* zinc-950 */
-    html { overscroll-behavior-y: contain; }
+    /* Safe-area padding for notches / the home indicator. Plain env() —
+       requires viewport-fit=cover in the viewport meta above. Inert (0)
+       when the shell exposes no insets. */
+    .safe-top { padding-top: env(safe-area-inset-top); }
+    .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
     .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
     .pencil-host:hover .pencil { opacity: 1; }
     .cat-head .cat-del { opacity: 0; transition: opacity .12s; }
     .cat-head:hover .cat-del { opacity: 1; }
     .drag-handle { cursor: grab; touch-action: none; }
     .drag-handle:active { cursor: grabbing; }
+    /* iOS-style swipe-to-reveal actions (mobile). The front layer and the
+       action buttons translate together: the buttons ride in from the right
+       edge with the gesture and ride back out when it closes. */
+    .swipe-wrap { touch-action: pan-y; }
+    .swipe-front { position: relative; transition: transform .18s ease-out; }
+    .swipe-actions { transform: translateX(100%); transition: transform .18s ease-out; }
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
       -webkit-user-select: none; user-select: none;
@@ -146,13 +142,8 @@
     }
   </style>
 </head>
-<body class="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 h-[100dvh] overflow-hidden">
-  <!-- #scroll is the app's one scroll container (not the viewport) — the
-       native kit's pull-to-refresh transforms it and parks its spinner in
-       the parent, so it must be a real scrollable element. -->
-  <div id="scroll" class="h-full overflow-y-auto">
-    <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
-  </div>
+<body class="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen">
+  <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
 
   <!-- Members modal -->
   <div id="modal-backdrop" class="hidden fixed inset-0 bg-black/40 dark:bg-black/60 z-40"></div>
@@ -190,7 +181,7 @@
     </form>
   </div>
 
-  <div id="toast" class="un-safe-bottom hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-sm px-4 py-2 rounded-lg shadow-lg z-50"></div>
+  <div id="toast" class="safe-bottom hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-sm px-4 py-2 rounded-lg shadow-lg z-50"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -458,17 +449,6 @@
     // --- routing --------------------------------------------------------------
     let current = null; // current list detail payload (List View) or null (Home)
 
-    // Which screen is on-screen — drives the push/pop direction of the kit's
-    // screen transition. Only real Home ↔ List navigations animate; the
-    // initial load and all in-place repaints render instantly.
-    let lastScreen = null; // 'home' | 'list' | null (nothing rendered yet)
-
-    function renderScreen(fn, type) {
-      if (type !== 'none' && window.unNative && unNative.transition) {
-        unNative.transition(fn, { type });
-      } else fn();
-    }
-
     function route() {
       const m = location.hash.match(/^#\/list\/(\d+)$/);
       if (m) loadList(m[1]);
@@ -481,27 +461,16 @@
       current = null;
       disconnectEvents();
       const app = document.getElementById('app');
-      // Transitioned navigations fetch first and render inside the animation;
-      // the "Loading…" stub only shows on a direct/initial load.
-      const type = lastScreen === 'list' ? 'pop' : 'none';
-      if (type === 'none') app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
+      app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
       let lists;
       try {
         ({ lists } = await api('/api/lists'));
       } catch (e) {
         app.innerHTML = '<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">' + esc(e.message) + '</p>';
-        lastScreen = 'home';
         return;
       }
-      if (current) return; // navigated into a list mid-fetch
-      renderScreen(() => renderHome(lists), type);
-      lastScreen = 'home';
-    }
-
-    function renderHome(lists) {
-      const app = document.getElementById('app');
       app.innerHTML = `
-        <header class="un-safe-top sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center justify-between pt-3 pb-7">
+        <header class="safe-top sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center justify-between pt-3 pb-7">
           <h1 class="text-xl font-bold">My Lists</h1>
           <div class="flex items-center gap-2">
             <button onclick="cycleTheme()" id="home-theme" title="Toggle theme (system / light / dark)"
@@ -532,15 +501,6 @@
       `;
     }
 
-    // Silent refetch for pull-to-refresh — no "Loading…" wipe.
-    async function refreshHome() {
-      try {
-        const { lists } = await api('/api/lists');
-        if (current) return; // navigated into a list mid-fetch
-        renderHome(lists);
-      } catch (e) { toast(e.message); }
-    }
-
     async function newList() {
       const name = await askText('List name:');
       if (!name || !name.trim()) return;
@@ -554,19 +514,16 @@
     async function loadList(id) {
       searchQuery = ''; // a freshly opened list always starts unfiltered
       const app = document.getElementById('app');
-      const type = lastScreen === 'home' ? 'push' : 'none';
-      if (type === 'none') app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
+      app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
       try {
         current = await api('/api/lists/' + id);
       } catch (e) {
         disconnectEvents();
         app.innerHTML = `<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">${esc(e.message)}</p>
           <p class="text-center"><a href="#/" class="text-violet-600 dark:text-violet-400 text-sm">← Back to My Lists</a></p>`;
-        lastScreen = 'list';
         return;
       }
-      renderScreen(() => renderList(current), type);
-      lastScreen = 'list';
+      renderList(current);
       connectEvents(current.list.id);
     }
 
@@ -631,7 +588,7 @@
       const isOwner = d.role === 'owner';
       const app = document.getElementById('app');
       app.innerHTML = `
-        <header class="un-safe-top sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center gap-2 pt-3 pb-6 flex-wrap">
+        <header class="safe-top sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center gap-2 pt-3 pb-6 flex-wrap">
           <a href="#/" class="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
           <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-600 dark:hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
               ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-400 dark:text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
@@ -650,10 +607,8 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="block"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
             </button>
             <div id="drawer" class="hidden absolute right-0 top-full mt-1 w-56 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xl z-30 py-1.5">
-              <label class="flex items-center justify-between gap-3 px-3.5 py-2 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer">
-                <span>Show completed</span>
-                <input type="checkbox" class="un-switch" ${showCompleted() ? 'checked' : ''} onchange="setShowCompleted(this.checked)">
-              </label>
+              <button onclick="closeDrawer(); setShowCompleted(true)" class="${DRAWER_ITEM}">✓&nbsp; Show all done</button>
+              <button onclick="closeDrawer(); setShowCompleted(false)" class="${DRAWER_ITEM}">⊘&nbsp; Hide all done</button>
               <div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
               <button onclick="closeDrawer(); openExport()" class="${DRAWER_ITEM}">⤓&nbsp; Export markdown</button>
               <button onclick="closeDrawer(); openImport('merge')" class="${DRAWER_ITEM}">⤒&nbsp; Import markdown</button>
@@ -688,7 +643,6 @@
                  class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
         </form>
       `;
-      attachRowGestures(app);
     }
 
     // --- drawer ------------------------------------------------------------------
@@ -704,6 +658,7 @@
     document.addEventListener('click', e => {
       const d = document.getElementById('drawer');
       if (d && !d.classList.contains('hidden') && !e.target.closest('#drawer-wrap')) closeDrawer();
+      if (openSwipe && !suppressTap && !e.target.closest('.swipe-actions')) closeOpenSwipe();
     });
 
     function renderCategory(c) {
@@ -733,10 +688,12 @@
       const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH || searching ? 'false' : 'true'}" class="cat-section${topGap}">
-          <!-- No margin on the head: it lives inside the kit's swipe wrapper,
-               and unpainted margin there exposes the action tray behind it.
-               The gap below moves to the following blocks' margin-top. -->
-          <div class="cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+          <div class="swipe-wrap relative overflow-hidden ${fullyDone ? 'mb-0.5' : 'mb-1'}">
+            <div class="swipe-actions absolute inset-y-0 right-0 flex">
+              <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
+              <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+            </div>
+            <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
               ${searching ? '' : `
               <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed items in this category"
@@ -755,15 +712,16 @@
                       class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>`}
               <button onclick="deleteCategory(${c.id})" title="Delete category"
                       class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
+            </div>
           </div>
           ${openAdders.has(c.id) && !searching ? `
-          <form onsubmit="return addItem(event, ${c.id})" class="mt-1 mb-0.5 flex items-center gap-2 px-1">
+          <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
             <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
             <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
                    onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
                    class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
           </form>` : ''}
-          <div class="active-items space-y-0.5 mt-1">
+          <div class="active-items space-y-0.5">
             ${unchecked.map(renderItem).join('')}
             ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
           </div>
@@ -783,9 +741,11 @@
 
     // Tapping anywhere on the row toggles the item; interactive children
     // (checkbox, edit/delete buttons, drag handle) keep their own behavior.
-    // suppressTap eats the click that trails a long-press drag.
+    // A tap that ends a swipe gesture (or lands while a row is swiped open)
+    // closes the swipe instead of toggling.
     function rowTap(ev, id) {
       if (suppressTap) return;
+      if (openSwipe) { closeOpenSwipe(); return; }
       if (ev.target.closest('button, input, .drag-handle')) return;
       const item = current.items.find(i => i.id === id);
       if (item) toggleItem(id, !item.checked);
@@ -795,55 +755,32 @@
     // title toggles the done-items collapse instead.
     function catTitleTap(ev, id) {
       if (suppressTap) return;
+      if (openSwipe) { closeOpenSwipe(); return; }
       if (IS_TOUCH) { toggleCatDone(id); return; }
       renameCategory(id);
     }
 
     function renderItem(i) {
       return `
-        <div class="item-row group flex items-center gap-2 px-1 py-1.5 cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
-             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH || searchActive() ? 'false' : 'true'}"
-             onclick="rowTap(event, ${i.id})">
-          ${searchActive() ? '' : `<span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>`}
-          <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
-                 class="todo-check">
-          <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
-          ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
-          <button onclick="editItem(${i.id})" title="Edit"
-                  class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
-          <button onclick="deleteItem(${i.id})" title="Delete"
-                  class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
+        <div class="swipe-wrap relative overflow-hidden rounded-lg">
+          <div class="swipe-actions absolute inset-y-0 right-0 flex">
+            <button onclick="editItem(${i.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
+            <button onclick="deleteItem(${i.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+          </div>
+          <div class="swipe-front item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
+               data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH || searchActive() ? 'false' : 'true'}"
+               onclick="rowTap(event, ${i.id})">
+            ${searchActive() ? '' : `<span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>`}
+            <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
+                   class="todo-check">
+            <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
+            ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
+            <button onclick="editItem(${i.id})" title="Edit"
+                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
+            <button onclick="deleteItem(${i.id})" title="Delete"
+                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
+          </div>
         </div>`;
-    }
-
-    // usernode-native swipe actions. Repaints re-create rows wholesale via
-    // innerHTML/outerHTML, so attach after every render pass — discarded nodes
-    // take their kit listeners with them, and the data-un-swipe marker keeps
-    // overlapping passes from double-attaching.
-    function attachRowGestures(root) {
-      if (!window.unNative || !unNative.attachSwipeActions || !root) return;
-      root.querySelectorAll('.item-row').forEach(row => {
-        if (row.dataset.unSwipe) return;
-        row.dataset.unSwipe = '1';
-        const id = +row.dataset.item;
-        const checked = row.dataset.checked === '1';
-        unNative.attachSwipeActions(row, { actions: [
-          { label: checked ? 'Undo' : 'Complete', handler: () => toggleItem(id, !checked) },
-          { label: 'Rename', handler: () => editItem(id) },
-          { label: 'Delete', destructive: true, handler: () => deleteItem(id) },
-        ] });
-      });
-      root.querySelectorAll('.cat-head').forEach(head => {
-        if (head.dataset.unSwipe) return;
-        head.dataset.unSwipe = '1';
-        const sec = head.closest('.cat-section');
-        if (!sec) return;
-        const id = +sec.dataset.cat;
-        unNative.attachSwipeActions(head, { actions: [
-          { label: 'Rename', handler: () => renameCategory(id) },
-          { label: 'Delete', destructive: true, handler: () => deleteCategory(id) },
-        ] });
-      });
     }
 
     // Targeted repaints — swap just the affected category section so the rest
@@ -855,12 +792,13 @@
       const c = current.categories.find(x => x.id === catId);
       const el = document.getElementById('cat-' + catId);
       if (!c || !el) return;
+      openSwipe = null;
       el.outerHTML = renderCategory(c);
-      attachRowGestures(document.getElementById('cat-' + catId));
     }
     function repaintAllCategories() {
       const el = document.getElementById('cats');
-      if (el) { el.innerHTML = renderCats(); attachRowGestures(el); }
+      openSwipe = null;
+      if (el) el.innerHTML = renderCats();
     }
 
     // --- search handlers -------------------------------------------------------
@@ -937,24 +875,21 @@
 
     // Any category can be deleted (with its items) except the last one.
     async function deleteCategory(id) {
-      // A destructive swipe commit removes the header row from the DOM before
-      // this runs — every path that doesn't delete must repaint to restore it.
       if (current.categories.length <= 1) {
-        toast("Can't delete the only category — lists need at least one");
-        return repaintCategory(id);
+        return toast("Can't delete the only category — lists need at least one");
       }
       const cat = current.categories.find(c => c.id === id);
       const n = current.items.filter(i => i.category_id === id).length;
       const msg = 'Delete category "' + (cat ? cat.name : '') + '"' +
         (n ? ' and its ' + n + ' item' + (n > 1 ? 's' : '') : '') + '?';
-      if (!await askConfirm(msg)) return repaintCategory(id);
+      if (!await askConfirm(msg)) return;
       try {
         await api('/api/categories/' + id, { method: 'DELETE' });
         current.categories = current.categories.filter(c => c.id !== id);
         current.items = current.items.filter(i => i.category_id !== id);
         const el = document.getElementById('cat-' + id);
         if (el) el.remove();
-      } catch (e) { toast(e.message); repaintCategory(id); }
+      } catch (e) { toast(e.message); }
     }
 
     // --- item actions ---------------------------------------------------------------
@@ -983,7 +918,6 @@
             const ph = body.querySelector('.empty-note');
             if (ph) ph.remove();
             body.insertAdjacentHTML('afterbegin', renderItem(item));
-            attachRowGestures(body);
           }
         }
       } catch (e) { toast(e.message); input.value = text; }
@@ -1020,10 +954,8 @@
       try {
         await api('/api/items/' + id, { method: 'DELETE' });
         current.items = current.items.filter(i => i.id !== id);
+        if (item) repaintCategory(item.category_id);
       } catch (e) { toast(e.message); }
-      // Repaint on failure too: a destructive swipe commit already collapsed
-      // the row out of the DOM, so a failed delete must restore it.
-      if (item) repaintCategory(item.category_id);
     }
 
     // --- drag & drop reordering -------------------------------------------------
@@ -1070,10 +1002,9 @@
       if (dragY < zone) v = -SCROLL_MAX_SPEED * Math.min(1, (zone - dragY) / zone);
       else if (dragY > vh - zone) v = SCROLL_MAX_SPEED * Math.min(1, (dragY - (vh - zone)) / zone);
       if (v && dt) {
-        const sc = document.getElementById('scroll');
-        const before = sc.scrollTop;
-        sc.scrollBy(0, v * dt);
-        if (sc.scrollTop !== before) {
+        const before = window.scrollY;
+        window.scrollBy(0, v * dt);
+        if (window.scrollY !== before) {
           cueFromPoint(document.elementFromPoint(dragX, dragY), dragY);
         }
       }
@@ -1140,7 +1071,7 @@
         clearDropCue();
         if (best.row) {
           const after = clientY > best.r.top + best.r.height / 2;
-          best.row.classList.add(after ? 'drop-after' : 'drop-before');
+          (best.row.closest('.swipe-wrap') || best.row).classList.add(after ? 'drop-after' : 'drop-before');
           dropCue = { catId: +best.row.dataset.cat, id: +best.row.dataset.item, after };
         } else {
           best.sec.classList.add('drop-into');
@@ -1165,7 +1096,8 @@
 
     // Shared by desktop dragover and touch (long-press) drag. Computes the
     // drop cue for the element under the pointer; returns true when that
-    // position is a valid drop target.
+    // position is a valid drop target. Row cues paint on the swipe wrapper —
+    // the row itself sits inside overflow-hidden, which clips box-shadows.
     function cueFromPoint(targetEl, clientY) {
       if (!drag) { clearDropCue(); return false; }
       if (!targetEl || !targetEl.closest) return nearestDropCue(clientY);
@@ -1180,7 +1112,7 @@
         if (row && (row.dataset.checked === '1') === drag.checked) {
           const r = row.getBoundingClientRect();
           const after = clientY > r.top + r.height / 2;
-          row.classList.add(after ? 'drop-after' : 'drop-before');
+          (row.closest('.swipe-wrap') || row).classList.add(after ? 'drop-after' : 'drop-before');
           dropCue = { catId: +row.dataset.cat, id: +row.dataset.item, after };
           return true;
         }
@@ -1235,17 +1167,40 @@
     });
 
     // --- touch gestures (mobile) --------------------------------------------------
-    // Single tap toggles (via the row's click handler). Swipe-to-reveal actions
-    // are the usernode-native kit's (see attachRowGestures). Long-press (then
-    // move) drags to reorder — HTML5 DnD doesn't fire on touch, so this drives
-    // the same drag/dropCue state by hand.
+    // Single tap toggles (via the row's click handler). Swipe left on a row or
+    // category header reveals Rename/Delete. Long-press (then move) drags to
+    // reorder — HTML5 DnD doesn't fire on touch, so this drives the same
+    // drag/dropCue state by hand.
     const IS_TOUCH = window.matchMedia('(hover: none) and (pointer: coarse)').matches ||
                      'ontouchstart' in window;
+    const SWIPE_W = 136;   // total width of the two revealed action buttons
+    let swipe = null;      // in-flight gesture: { wrap, front, startX, startY, dx, mode, wasOpen }
+    let openSwipe = null;  // .swipe-wrap currently left open
     let lpTimer = null;    // long-press timer
     let touchDragging = false;
     let suppressTap = false;
-    let touchStartX = 0, touchStartY = 0;
 
+    // Positions the front layer and the action buttons as one unit: at
+    // offset 0 the actions sit just past the right edge (CSS default
+    // translateX(100%)); at -SWIPE_W they're fully revealed.
+    function setSwipeOffset(wrap, off, animate) {
+      const front = wrap.querySelector('.swipe-front');
+      const actions = wrap.querySelector('.swipe-actions');
+      const t = animate ? '' : 'none';
+      if (front) {
+        front.style.transition = t;
+        front.style.transform = off ? 'translateX(' + off + 'px)' : '';
+      }
+      if (actions) {
+        actions.style.transition = t;
+        actions.style.transform = off ? 'translateX(' + (SWIPE_W + off) + 'px)' : '';
+      }
+    }
+    function closeOpenSwipe() {
+      if (!openSwipe) return;
+      setSwipeOffset(openSwipe, 0, true);
+      openSwipe = null;
+    }
     function suppressNextTap() {
       suppressTap = true;
       setTimeout(() => { suppressTap = false; }, 350);
@@ -1254,7 +1209,12 @@
     appEl.addEventListener('touchstart', e => {
       if (!current || e.touches.length !== 1) return;
       const t = e.touches[0];
-      touchStartX = t.clientX; touchStartY = t.clientY;
+      const wrap = e.target.closest && e.target.closest('.swipe-wrap');
+      swipe = wrap ? {
+        wrap,
+        startX: t.clientX, startY: t.clientY, dx: 0, mode: null,
+        wasOpen: wrap === openSwipe,
+      } : null;
       clearTimeout(lpTimer);
       if (e.target.closest && e.target.closest('button, input, a')) return;
       const row = e.target.closest && e.target.closest('.item-row');
@@ -1267,9 +1227,11 @@
       }
       if (info && !searchActive()) { // long-press drag is disabled while filtered too
         lpTimer = setTimeout(() => {
+          if (swipe && swipe.mode) return; // already swiping/scrolling
           touchDragging = true;
           drag = info;
           info.el.classList.add('dragging');
+          closeOpenSwipe();
           if (navigator.vibrate) navigator.vibrate(10);
           dragX = t.clientX; dragY = t.clientY;
           startAutoScroll();
@@ -1286,24 +1248,55 @@
         cueFromPoint(el, t.clientY);
         return;
       }
-      // Real movement before the long-press fires cancels it — a kit swipe or
-      // a scroll must never also start a drag.
-      if (Math.abs(t.clientX - touchStartX) > 8 || Math.abs(t.clientY - touchStartY) > 8) {
-        clearTimeout(lpTimer);
+      if (!swipe) return;
+      const dx = t.clientX - swipe.startX;
+      const dy = t.clientY - swipe.startY;
+      if (!swipe.mode) {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+          swipe.mode = 'h';
+          clearTimeout(lpTimer);
+        } else if (Math.abs(dy) > 10) {
+          clearTimeout(lpTimer);
+          swipe = null; // vertical scroll — hands off
+          return;
+        } else if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+          clearTimeout(lpTimer); // moved too much for a long-press
+        }
+      }
+      if (swipe.mode === 'h') {
+        e.preventDefault();
+        const base = swipe.wasOpen ? -SWIPE_W : 0;
+        swipe.dx = Math.max(-SWIPE_W, Math.min(0, base + dx));
+        setSwipeOffset(swipe.wrap, swipe.dx, false);
       }
     }, { passive: false });
 
     appEl.addEventListener('touchend', () => {
       clearTimeout(lpTimer);
-      if (!touchDragging) return;
-      touchDragging = false;
-      stopAutoScroll();
-      suppressNextTap();
-      document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
-      const d = drag, cue = dropCue;
-      drag = null;
-      clearDropCue();
-      if (d && cue) (d.type === 'item' ? applyItemReorder(d, cue) : applyCategoryReorder(d, cue));
+      if (touchDragging) {
+        touchDragging = false;
+        stopAutoScroll();
+        suppressNextTap();
+        document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+        const d = drag, cue = dropCue;
+        drag = null;
+        clearDropCue();
+        if (d && cue) (d.type === 'item' ? applyItemReorder(d, cue) : applyCategoryReorder(d, cue));
+        swipe = null;
+        return;
+      }
+      if (swipe && swipe.mode === 'h') {
+        if (openSwipe && openSwipe !== swipe.wrap) closeOpenSwipe();
+        if (swipe.dx < -SWIPE_W / 2) {
+          setSwipeOffset(swipe.wrap, -SWIPE_W, true);
+          openSwipe = swipe.wrap;
+        } else {
+          setSwipeOffset(swipe.wrap, 0, true);
+          if (openSwipe === swipe.wrap) openSwipe = null;
+        }
+        suppressNextTap();
+      }
+      swipe = null;
     }, { passive: true });
 
     appEl.addEventListener('touchcancel', () => {
@@ -1315,6 +1308,8 @@
         drag = null;
         clearDropCue();
       }
+      if (swipe) setSwipeOffset(swipe.wrap, swipe.wasOpen ? -SWIPE_W : 0, true);
+      swipe = null;
     }, { passive: true });
 
     // Handles both same-category reorders and cross-category moves. The item
@@ -1604,17 +1599,6 @@
         openMembers();
       } catch (e) { toast(e.message); }
     }
-
-    // Native pull-to-refresh on the app's scroll container (the kit no-ops on
-    // desktop). Dispatches by route: silent refetch of the open list or Home.
-    // try/catch: the kit is beta and hosted centrally — a kit hiccup must
-    // never take the whole boot script down with it.
-    try {
-      if (window.unNative && unNative.attachPullToRefresh) {
-        unNative.attachPullToRefresh(document.getElementById('scroll'),
-          () => current ? refreshList() : refreshHome());
-      }
-    } catch (e) { console.warn('pull-to-refresh unavailable:', e); }
 
     applyTheme();
     route();
