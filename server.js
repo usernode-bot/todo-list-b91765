@@ -705,6 +705,25 @@ async function seedDemoListFor(user) {
          ($2, 'Sunscreen', TRUE, 1, NOW(), $3)`,
       [general.id, groceries.id, user.username]
     );
+    // A second, shared list so the owner-inclusive member count is visible
+    // on Home ("2 members" = the tester + staging-demo-user).
+    const shared = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING id`,
+      ['Demo: Shared Errands', user.id, user.username]
+    )).rows[0];
+    const sharedGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [shared.id]
+    )).rows[0];
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
+         ($1, 'Pick up dry cleaning', FALSE, 1, NULL, $2)`,
+      [sharedGeneral.id, user.username]
+    );
+    await client.query(
+      `INSERT INTO list_members (list_id, username) VALUES ($1, 'staging-demo-user')`,
+      [shared.id]
+    );
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
