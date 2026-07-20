@@ -3,6 +3,7 @@
   "secrets": [],
   "tests": [
     { "name": "App shell loads", "path": "/", "expectSelector": "#app" },
+    { "name": "Native polish boots", "path": "/", "expectSelector": "#ptr-puck" },
     { "name": "Shared list counts the owner in its member count", "path": "/", "expectText": "2 members" }
   ],
   "visibility": {

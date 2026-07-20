@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 
   <script>
@@ -66,7 +66,7 @@
   </script>
   <title>Todo List</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script>tailwind.config = { darkMode: 'class' }</script>
+  <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
     // localStorage wins; otherwise follow the system preference.
@@ -80,18 +80,112 @@
     })();
   </script>
   <style>
+    /* ── iOS system palette — violet is the tint, grays are system grays ── */
+    :root {
+      --bg: #f2f2f7;                      /* systemGroupedBackground */
+      --card: #ffffff;                    /* secondarySystemGroupedBackground */
+      --card-active: #d1d1d6;             /* pressed-row tint (systemGray4) */
+      --separator: rgba(60, 60, 67, .29);
+      --label: #000000;
+      --label2: rgba(60, 60, 67, .6);     /* secondaryLabel */
+      --label3: rgba(60, 60, 67, .3);     /* tertiaryLabel */
+      --fill: rgba(118, 118, 128, .12);   /* search / field fills */
+      --gray: #8e8e93;                    /* systemGray — neutral swipe action */
+      --tint: #7c3aed;                    /* violet-600 */
+      --danger: #ff3b30;                  /* systemRed */
+      --bar: rgba(242, 242, 247, .78);    /* nav-bar wash over --bg */
+    }
+    .dark {
+      --bg: #000000;
+      --card: #1c1c1e;
+      --card-active: #3a3a3c;
+      --separator: rgba(84, 84, 88, .6);
+      --label: #ffffff;
+      --label2: rgba(235, 235, 245, .6);
+      --label3: rgba(235, 235, 245, .3);
+      --fill: rgba(118, 118, 128, .24);
+      --gray: #8e8e93;
+      --tint: #a78bfa;                    /* violet-400 reads better on black */
+      --danger: #ff453a;
+      --bar: rgba(0, 0, 0, .78);
+    }
+    html { overscroll-behavior-y: contain; }
+    body { background: var(--bg); color: var(--label); }
+    .surface { background: var(--card); }
+    .tinted { color: var(--tint); }
+
+    /* Safe-area padding for notches / the home indicator. Plain env() —
+       requires viewport-fit=cover in the viewport meta above. Inert (0)
+       when the shell exposes no insets. */
+    .safe-top { padding-top: env(safe-area-inset-top); }
+    .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+    /* ── Instant pressed states: engage with zero latency, ease on release.
+       `scale` (not transform) so positioned elements keep their translates. */
+    * { -webkit-tap-highlight-color: transparent; }
+    button, a { transition: scale .2s, filter .2s; }
+    button:active, a:active, .pressable:active {
+      scale: .97; filter: brightness(.85); transition: none;
+    }
+    /* Full-width rows tint like UITableView cells instead of scaling. */
+    .row-press { transition: background-color .2s; }
+    .row-press:active {
+      background-color: var(--card-active) !important;
+      scale: none; filter: none; transition: none;
+    }
+    .swipe-actions button, .drag-handle { scale: none !important; filter: none !important; }
+
+    /* ── Nav bars ── */
+    .nav-bar {
+      background: var(--bar);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid transparent;
+    }
+    .nav-bar.scrolled { border-bottom-color: var(--separator); }
+    .nav-title { font-size: 17px; font-weight: 600; transition: opacity .15s; }
+    .large-title { font-size: 34px; font-weight: 700; letter-spacing: -.02em; }
+
+    /* ── Inset-grouped cards (Settings / Reminders look) ── */
+    .ios-card { background: var(--card); border-radius: 12px; overflow: hidden; }
+    .sec-header {
+      font-size: 13px; font-weight: 400; text-transform: uppercase;
+      letter-spacing: .03em; color: var(--label2);
+    }
+    /* Hairline separators above every card row except the visual first.
+       Painted above the row (z-index) so it stays put while a row swipes. */
+    .card-row { position: relative; background: var(--card); }
+    .card-row::before {
+      content: ''; position: absolute; top: 0; left: 16px; right: 0;
+      height: 1px; background: var(--separator);
+      transform: scaleY(.5); transform-origin: top; z-index: 3;
+    }
+    .ios-card > .card-row:first-child::before,
+    .ios-card > :first-child > .card-row:first-child::before,
+    .active-items.hidden + .done-items > .card-row:first-child::before { display: none; }
+
     .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
     .pencil-host:hover .pencil { opacity: 1; }
     .cat-head .cat-del { opacity: 0; transition: opacity .12s; }
     .cat-head:hover .cat-del { opacity: 1; }
     .drag-handle { cursor: grab; touch-action: none; }
     .drag-handle:active { cursor: grabbing; }
-    /* iOS-style swipe-to-reveal actions (mobile). The front layer and the
-       action buttons translate together: the buttons ride in from the right
-       edge with the gesture and ride back out when it closes. */
+
+    /* ── Swipe rows: transforms are JS-owned (springs). No CSS transition on
+       gesture release — that's the fixed-duration anti-pattern. ── */
     .swipe-wrap { touch-action: pan-y; }
-    .swipe-front { position: relative; transition: transform .18s ease-out; }
-    .swipe-actions { transform: translateX(100%); transition: transform .18s ease-out; }
+    .swipe-front { position: relative; }
+    .swipe-actions { transform: translateX(100%); }
+    .swipe-actions button {
+      font-size: 13px; font-weight: 600; color: #fff;
+      display: flex; align-items: center; justify-content: center;
+    }
+    /* Full-swipe cue: past the commit point Delete grows to fill the tray —
+       a reversible state cue, so a transition (not a spring) is fine here. */
+    .swipe-actions .act-del { flex-grow: 0; transition: flex-grow .15s ease-out; }
+    .swipe-wrap.commit-armed .act-del { flex-grow: 8; }
+    .swipe-wrap.collapsing { transition: height .25s ease-in; }
+
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
       -webkit-user-select: none; user-select: none;
@@ -113,37 +207,119 @@
     .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
     .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
     .dragging { opacity: 0.4; }
-    /* Custom checkbox — native ones render a washed-out light box in dark mode. */
+
+    /* ── Reminders-style circular checkbox ── */
     .todo-check {
       appearance: none; -webkit-appearance: none;
-      width: 1.05rem; height: 1.05rem;
-      border-radius: 0.3rem;
-      border: 1.5px solid #a1a1aa;        /* zinc-400 */
-      background: #ffffff;
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 1.5px solid var(--label3);
+      background: transparent;
       cursor: pointer; position: relative; flex-shrink: 0;
-      transition: background .1s, border-color .1s;
+      transition: background .15s, border-color .15s, scale .15s;
     }
-    .dark .todo-check {
-      border-color: #52525b;              /* zinc-600 */
-      background: rgba(255, 255, 255, 0.05);
-    }
-    .todo-check:hover { border-color: #8b5cf6; }
-    .todo-check:checked { background: #7c3aed; border-color: #7c3aed; }
+    .todo-check:hover { border-color: var(--tint); }
+    .todo-check:active { scale: .88; }
+    .todo-check:checked { background: var(--tint); border-color: var(--tint); }
     .todo-check:checked::after {
       content: ''; position: absolute;
-      left: 4.5px; top: 1.5px; width: 5px; height: 9px;
+      left: 6.5px; top: 3px; width: 6px; height: 11px;
       border: solid #fff; border-width: 0 2px 2px 0;
       transform: rotate(45deg);
     }
+
+    /* ── iOS switch ── */
+    .ios-switch {
+      appearance: none; -webkit-appearance: none;
+      width: 51px; height: 31px; border-radius: 31px;
+      background: rgba(120, 120, 128, .16);
+      position: relative; cursor: pointer; flex-shrink: 0;
+      transition: background .25s;
+    }
+    .dark .ios-switch { background: rgba(120, 120, 128, .32); }
+    .ios-switch::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 27px; height: 27px; border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 3px 8px rgba(0, 0, 0, .15), 0 1px 1px rgba(0, 0, 0, .16);
+      transition: transform .25s cubic-bezier(.175, .885, .32, 1.1);
+    }
+    .ios-switch:checked { background: var(--tint); }
+    .ios-switch:checked::after { transform: translateX(20px); }
+
+    /* ── Pull-to-refresh puck ── */
+    #ptr-puck {
+      position: fixed; top: 10px; left: 50%; z-index: 70;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: var(--card); color: var(--label2);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transform: translate(-50%, -48px);
+      pointer-events: none;
+    }
+    #ptr-puck.armed { color: var(--tint); }
+    #ptr-puck.refreshing svg { animation: ptr-spin .8s linear infinite; }
+    @keyframes ptr-spin { to { transform: rotate(360deg); } }
+
+    /* ── Bottom sheets & iOS alerts ── */
+    .sheet-panel {
+      position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 65;
+      transform: translateY(115%); touch-action: none;
+    }
+    .sheet-card { background: var(--card); border-radius: 14px; overflow: hidden; }
+    .sheet-grabber {
+      width: 36px; height: 5px; border-radius: 3px;
+      background: var(--label3); margin: 8px auto 2px;
+    }
+    .sheet-row {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; text-align: left; gap: 12px;
+      padding: 13px 16px; font-size: 17px; color: var(--label);
+      position: relative;
+    }
+    .sheet-row + .sheet-row::before {
+      content: ''; position: absolute; top: 0; left: 16px; right: 0;
+      height: 1px; background: var(--separator); transform: scaleY(.5);
+    }
+    .alert-card {
+      width: 270px; max-width: 86vw; border-radius: 14px; overflow: hidden;
+      background: var(--card);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+    }
+    .alert-btn {
+      font-size: 17px; color: var(--tint); padding: 11px 8px; text-align: center;
+      border-top: 1px solid var(--separator);
+    }
+    #dialog-buttons.grid-cols-2 > :nth-child(2) { border-left: 1px solid var(--separator); }
+
+    /* ── Push/pop screen transitions (View Transitions API; instant cut
+       where unsupported). iOS nav curve + parallax under-slide. ── */
+    @keyframes vt-in-right  { from { transform: translateX(100%); } }
+    @keyframes vt-out-left  { to { transform: translateX(-30%); opacity: .7; } }
+    @keyframes vt-in-left   { from { transform: translateX(-30%); opacity: .7; } }
+    @keyframes vt-out-right { to { transform: translateX(100%); } }
+    :root[data-vt] ::view-transition-old(root),
+    :root[data-vt] ::view-transition-new(root) {
+      animation-duration: .35s;
+      animation-timing-function: cubic-bezier(.32, .72, 0, 1);
+      animation-fill-mode: both;
+      mix-blend-mode: normal;
+    }
+    :root[data-vt="push"]::view-transition-new(root) { animation-name: vt-in-right; }
+    :root[data-vt="push"]::view-transition-old(root) { animation-name: vt-out-left; }
+    :root[data-vt="pop"]::view-transition-new(root)  { animation-name: vt-in-left; }
+    :root[data-vt="pop"]::view-transition-old(root)  { animation-name: vt-out-right; z-index: 1; }
   </style>
 </head>
-<body class="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen">
+<body class="min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
+
+  <!-- Pull-to-refresh spinner puck (driven by the touch gesture arbiter) -->
+  <div id="ptr-puck"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg></div>
 
   <!-- Members modal -->
   <div id="modal-backdrop" class="hidden fixed inset-0 bg-black/40 dark:bg-black/60 z-40"></div>
   <div id="members-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-    <div class="pointer-events-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
+    <div class="pointer-events-auto surface rounded-2xl w-full max-w-sm p-5 shadow-xl">
       <div class="flex items-center justify-between mb-4">
         <h2 class="font-semibold text-lg">Members</h2>
         <button onclick="closeMembers()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
@@ -154,29 +330,49 @@
 
   <!-- Markdown import/export modal -->
   <div id="md-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 dark:bg-black/60">
-    <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
+    <div class="surface rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
       <div class="flex items-center justify-between">
         <h2 id="md-title" class="font-semibold text-lg"></h2>
         <button onclick="closeMd()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
       </div>
       <p id="md-hint" class="text-xs text-zinc-500"></p>
       <textarea id="md-text" rows="14" spellcheck="false"
-                class="w-full flex-1 bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg p-3 text-xs font-mono text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-700 focus:outline-none focus:border-violet-600 resize-none"></textarea>
+                class="w-full flex-1 rounded-lg p-3 text-xs font-mono focus:outline-none resize-none"
+                style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)"></textarea>
       <div id="md-actions" class="flex justify-end gap-2"></div>
     </div>
   </div>
 
-  <!-- Prompt/confirm/choice dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
-  <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 dark:bg-black/60">
-    <form id="dialog-form" class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl w-full max-w-sm p-5 shadow-xl">
-      <p id="dialog-title" class="text-sm text-zinc-700 dark:text-zinc-300 mb-3"></p>
-      <input id="dialog-input" autocomplete="off"
-             class="w-full bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600 mb-4">
-      <div id="dialog-buttons" class="flex justify-end gap-2 flex-wrap"></div>
+  <!-- iOS-style alert dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
+  <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40">
+    <form id="dialog-form" class="alert-card">
+      <div class="px-4 pt-5 pb-4">
+        <p id="dialog-title" class="text-[15px] font-semibold text-center"></p>
+        <input id="dialog-input" autocomplete="off"
+               class="mt-3 w-full rounded-md px-2.5 py-1.5 text-sm focus:outline-none"
+               style="background: var(--fill); border: 1px solid var(--separator);">
+      </div>
+      <div id="dialog-buttons" class="grid grid-cols-2"></div>
     </form>
   </div>
 
-  <div id="toast" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-sm px-4 py-2 rounded-lg shadow-lg z-50"></div>
+  <!-- iOS action sheet for destructive confirms (touch presentation) -->
+  <div id="asheet-backdrop" class="hidden fixed inset-0 z-[64] bg-black/40"></div>
+  <div id="asheet" class="hidden sheet-panel safe-bottom">
+    <div id="asheet-actions" class="sheet-card mb-2"></div>
+    <button type="button" id="asheet-cancel" class="sheet-card row-press block w-full py-3.5 text-[17px] font-semibold tinted text-center">Cancel</button>
+  </div>
+
+  <!-- ☰ menu as a bottom sheet on touch (drag-to-dismiss) -->
+  <div id="sheet-backdrop" class="hidden fixed inset-0 z-[63] bg-black/40"></div>
+  <div id="menu-sheet" class="hidden sheet-panel">
+    <div class="sheet-card safe-bottom">
+      <div class="sheet-grabber"></div>
+      <div id="menu-sheet-body" class="pb-1"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="safe-bottom hidden fixed bottom-6 left-1/2 -translate-x-1/2 surface text-[13px] px-4 py-2.5 rounded-full shadow-lg z-50"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -206,9 +402,9 @@
       toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
     }
 
-    // Shared class strings for both themes.
-    const BTN_SOFT = 'bg-zinc-200 hover:bg-zinc-300 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-300';
-    const DRAWER_ITEM = 'w-full text-left px-3.5 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800';
+    // Shared class strings — the palette flows from the CSS variables.
+    const BTN_SOFT = 'bg-[var(--fill)] text-[color:var(--label)]';
+    const DRAWER_ITEM = 'w-full flex items-center justify-between gap-3 text-left px-4 py-2.5 text-[15px] row-press hover:bg-[var(--fill)]';
 
     // Closed-padlock icon marking private (owner-only) lists; inherits text color.
     function lockSvg(size) {
@@ -224,6 +420,9 @@
     const dialogInput = document.getElementById('dialog-input');
 
     function openDialog({ title, withInput = false, value = '', choices = null, okLabel = 'OK' }) {
+      // Destructive confirms present as an iOS action sheet on touch; text
+      // prompts (and desktop confirms) present as a centered iOS alert.
+      if (choices && IS_TOUCH) return openActionSheet({ title, choices });
       return new Promise(resolve => {
         dialogResolve = resolve;
         dialogChoices = choices;
@@ -231,17 +430,60 @@
         dialogInput.classList.toggle('hidden', !withInput);
         dialogInput.value = value;
         const btns = document.getElementById('dialog-buttons');
-        let html = `<button type="button" data-dlg="cancel" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>`;
+        let html = `<button type="button" data-dlg="cancel" class="alert-btn">Cancel</button>`;
         if (choices) {
           html += choices.map((c, i) =>
-            `<button type="button" data-dlg="${i}" class="text-sm px-3 py-1.5 rounded-lg text-white ${c.danger ? 'bg-red-600 hover:bg-red-500' : 'bg-violet-600 hover:bg-violet-500'}">${esc(c.label)}</button>`
+            `<button type="button" data-dlg="${i}" class="alert-btn font-semibold${c.danger ? ' !text-[color:var(--danger)]' : ''}">${esc(c.label)}</button>`
           ).join('');
         } else {
-          html += `<button type="submit" class="text-sm px-3 py-1.5 rounded-lg text-white bg-violet-600 hover:bg-violet-500">${esc(okLabel)}</button>`;
+          html += `<button type="submit" class="alert-btn font-semibold">${esc(okLabel)}</button>`;
         }
         btns.innerHTML = html;
+        btns.className = 'grid ' + (choices && choices.length > 1 ? 'grid-cols-1' : 'grid-cols-2');
         dialogEl.classList.remove('hidden');
         if (withInput) setTimeout(() => { dialogInput.focus(); dialogInput.select(); }, 0);
+      });
+    }
+
+    // iOS action sheet: bottom-anchored destructive choices + separate Cancel,
+    // spring-up entrance, backdrop tap cancels. Same promise contract as the
+    // alert path, so askConfirm callers don't care which presentation ran.
+    let asheetSpring = null;
+    function openActionSheet({ title, choices }) {
+      return new Promise(resolve => {
+        const backdrop = document.getElementById('asheet-backdrop');
+        const panel = document.getElementById('asheet');
+        const body = document.getElementById('asheet-actions');
+        body.innerHTML =
+          (title ? `<p class="px-6 py-3 text-[13px] text-center" style="color: var(--label2)">${esc(title)}</p>` : '') +
+          choices.map((c, i) =>
+            `<button type="button" data-as="${i}" class="row-press block w-full py-3.5 text-[17px] text-center"
+                     style="${title || i ? 'border-top: 1px solid var(--separator);' : ''} color: ${c.danger ? 'var(--danger)' : 'var(--tint)'}">${esc(c.label)}</button>`
+          ).join('');
+        backdrop.classList.remove('hidden');
+        panel.classList.remove('hidden');
+        const h = panel.offsetHeight + 24;
+        const setY = y => { panel.style.transform = 'translateY(' + Math.max(-8, y) + 'px)'; };
+        setY(h);
+        if (asheetSpring) asheetSpring.stop();
+        asheetSpring = spring(setY, { from: h, to: 0, stiffness: 380, damping: 34 });
+        let settled = false;
+        function settle(result) {
+          if (settled) return;
+          settled = true;
+          if (asheetSpring) asheetSpring.stop();
+          asheetSpring = spring(setY, {
+            from: 0, to: h + 40, stiffness: 380, damping: 40,
+            onRest: () => { backdrop.classList.add('hidden'); panel.classList.add('hidden'); },
+          });
+          resolve(result);
+        }
+        body.onclick = ev => {
+          const b = ev.target.closest('[data-as]');
+          if (b) settle(choices[+b.dataset.as].value);
+        };
+        document.getElementById('asheet-cancel').onclick = () => settle(null);
+        backdrop.onclick = () => settle(null);
       });
     }
     function settleDialog(result) {
@@ -275,6 +517,54 @@
       return total + ' member' + (total === 1 ? '' : 's');
     }
 
+    // --- motion foundation -----------------------------------------------------
+    // rAF damped-spring integrator. Interruptible: current() hands the live
+    // position+velocity to whatever gesture grabs the element mid-flight.
+    function spring(onFrame, { from = 0, to = 0, velocity = 0, stiffness = 300, damping = 30, onRest } = {}) {
+      let x = from, v = velocity, raf = null, last = null, stopped = false;
+      function step(ts) {
+        if (stopped) return;
+        const dt = Math.min(0.032, last ? (ts - last) / 1000 : 1 / 60);
+        last = ts;
+        v += (-stiffness * (x - to) - damping * v) * dt;
+        x += v * dt;
+        if (Math.abs(x - to) < 0.5 && Math.abs(v) < 10) {
+          stopped = true; x = to; onFrame(x);
+          if (onRest) onRest();
+          return;
+        }
+        onFrame(x);
+        raf = requestAnimationFrame(step);
+      }
+      raf = requestAnimationFrame(step);
+      return {
+        stop() { stopped = true; if (raf) cancelAnimationFrame(raf); },
+        current() { return { x, v }; },
+      };
+    }
+
+    // Release velocity (px/s) from a rolling {t, x} sample window. The caller
+    // pushes a final sample at release time so a held-still pause decays
+    // momentum instead of replaying the last movement's speed.
+    function estimateVelocity(samples) {
+      if (samples.length < 2) return 0;
+      const newest = samples[samples.length - 1];
+      let oldest = samples[0];
+      for (let i = samples.length - 2; i >= 0; i--) {
+        oldest = samples[i];
+        if (newest.t - samples[i].t > 100) break;
+      }
+      const dt = (newest.t - oldest.t) / 1000;
+      return dt > 0 ? (newest.x - oldest.x) / dt : 0;
+    }
+
+    // Asymptotic resistance for overscroll / over-drag.
+    function rubberband(x, limit, coeff = 0.55) {
+      return limit * (1 - 1 / (1 + (x * coeff) / limit));
+    }
+
+    function haptic() { if (navigator.vibrate) navigator.vibrate(10); }
+
     // --- theme (light / dark / system) ----------------------------------------
     const THEME_KEY = 'todo:theme';
     function themePref() {
@@ -300,8 +590,9 @@
       updateThemeLabels();
     }
     function updateThemeLabels() {
-      const drawerBtn = document.getElementById('theme-btn');
-      if (drawerBtn) drawerBtn.textContent = 'Theme: ' + themeLabel();
+      document.querySelectorAll('[data-theme-label]').forEach(b => {
+        b.textContent = 'Theme: ' + themeLabel();
+      });
       const homeBtn = document.getElementById('home-theme');
       if (homeBtn) homeBtn.textContent = themeLabel();
     }
@@ -449,6 +740,19 @@
     // --- routing --------------------------------------------------------------
     let current = null; // current list detail payload (List View) or null (Home)
 
+    // Which screen is on-screen — drives the push/pop direction of the screen
+    // transition. Only real Home ↔ List navigations animate; the initial load
+    // and all in-place repaints render instantly.
+    let lastScreen = null; // 'home' | 'list' | null (nothing rendered yet)
+
+    function renderScreen(fn, type) {
+      if (type !== 'none' && document.startViewTransition) {
+        document.documentElement.dataset.vt = type;
+        const vt = document.startViewTransition(fn);
+        vt.finished.finally(() => { delete document.documentElement.dataset.vt; });
+      } else fn();
+    }
+
     function route() {
       const m = location.hash.match(/^#\/list\/(\d+)$/);
       if (m) loadList(m[1]);
@@ -461,44 +765,87 @@
       current = null;
       disconnectEvents();
       const app = document.getElementById('app');
-      app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
+      // Transitioned navigations fetch first and render inside the animation;
+      // the "Loading…" stub only shows on a direct/initial load.
+      const type = lastScreen === 'list' ? 'pop' : 'none';
+      if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
       let lists;
       try {
         ({ lists } = await api('/api/lists'));
       } catch (e) {
-        app.innerHTML = '<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">' + esc(e.message) + '</p>';
+        app.innerHTML = '<p class="text-red-500 text-sm py-8 text-center">' + esc(e.message) + '</p>';
+        lastScreen = 'home';
         return;
       }
+      if (current) return; // navigated into a list mid-fetch
+      renderScreen(() => renderHome(lists), type);
+      lastScreen = 'home';
+    }
+
+    function homeBadge(l) {
+      if (!l.is_owner) return '<span class="shrink-0 text-[11px] uppercase tracking-wide px-1.5 py-0.5 rounded" style="color: var(--label2); background: var(--fill)">Shared</span>';
+      if (Number(l.member_count) === 0) {
+        return '<span title="Private — only you can see this list" class="shrink-0 inline-flex items-center gap-1 text-[11px] uppercase tracking-wide px-1.5 py-0.5 rounded" style="color: var(--label2); background: var(--fill)">' + lockSvg(10) + 'Private</span>';
+      }
+      return '<span class="shrink-0 text-[11px] uppercase tracking-wide tinted px-1.5 py-0.5 rounded" style="background: var(--fill)">Owner</span>';
+    }
+
+    let homeIO = null;
+    function renderHome(lists) {
+      const app = document.getElementById('app');
       app.innerHTML = `
-        <header class="sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center justify-between pt-3 pb-7">
-          <h1 class="text-xl font-bold">My Lists</h1>
-          <div class="flex items-center gap-2">
+        <header id="home-bar" class="nav-bar safe-top sticky top-0 z-20 -mx-4 px-4 relative">
+          <div class="h-12 flex items-center justify-between gap-2">
+            <span id="home-inline-title" class="nav-title absolute left-1/2 -translate-x-1/2 opacity-0 pointer-events-none">My Lists</span>
             <button onclick="cycleTheme()" id="home-theme" title="Toggle theme (system / light / dark)"
-                    class="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800">${themeLabel()}</button>
-            <button onclick="openImport('new')" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 text-sm px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800">Import</button>
-            <button onclick="newList()" class="bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg">+ New List</button>
+                    class="tinted text-[15px] py-2 pr-2">${themeLabel()}</button>
+            <div class="flex items-center gap-3">
+              <button onclick="openImport('new')" class="tinted text-[15px] py-2 px-1">Import</button>
+              <button onclick="newList()" title="New list" aria-label="New list" class="tinted text-[26px] font-light leading-none pl-1 py-1">+</button>
+            </div>
           </div>
         </header>
-        ${lists.length ? '<div class="space-y-2">' + lists.map(l => `
-          <a href="#/list/${l.id}" class="block bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 rounded-xl px-4 py-3 shadow-sm dark:shadow-none">
-            <div class="flex items-center justify-between gap-2">
-              <span class="font-medium truncate">${esc(l.name)}</span>
-              ${l.is_owner
-                ? (Number(l.member_count) === 0
-                  ? '<span title="Private — only you can see this list" class="shrink-0 inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-300/60 dark:bg-zinc-700/40 px-1.5 py-0.5 rounded">' + lockSvg(10) + 'Private</span>'
-                  : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400 bg-violet-600/10 dark:bg-violet-600/15 px-1.5 py-0.5 rounded">Owner</span>')
-                : '<span class="shrink-0 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-300/60 dark:bg-zinc-700/40 px-1.5 py-0.5 rounded">Shared</span>'}
-            </div>
-            <div class="text-xs text-zinc-500 mt-1">
-              ${l.open_count} open · ${l.done_count} done
-              ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + memberLabel(Number(l.member_count) + 1) : '')}
+        <h1 id="home-large-title" class="large-title pt-2 pb-4">My Lists</h1>
+        ${lists.length ? '<div class="ios-card">' + lists.map(l => `
+          <a href="#/list/${l.id}" class="card-row row-press block px-4 py-3 hover:bg-[var(--fill)]">
+            <div class="flex items-center gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-[16px] truncate">${esc(l.name)}</span>
+                  ${homeBadge(l)}
+                </div>
+                <div class="text-[13px] mt-0.5" style="color: var(--label2)">
+                  ${l.open_count} open · ${l.done_count} done
+                  ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + memberLabel(Number(l.member_count) + 1) : '')}
+                </div>
+              </div>
+              <span class="text-[20px] leading-none font-semibold shrink-0" style="color: var(--label3)">›</span>
             </div>
           </a>`).join('') + '</div>'
-        : `<div class="text-center py-16 text-zinc-500">
+        : `<div class="text-center py-16" style="color: var(--label2)">
              <p class="mb-3">No lists yet.</p>
-             <button onclick="newList()" class="text-violet-600 dark:text-violet-400 hover:text-violet-500 dark:hover:text-violet-300 text-sm font-medium">Create your first list</button>
+             <button onclick="newList()" class="tinted text-[15px] font-medium">Create your first list</button>
            </div>`}
       `;
+      // Large-title collapse: when the big title scrolls under the bar, the
+      // inline title fades in and the bar shows its hairline.
+      if (homeIO) homeIO.disconnect();
+      homeIO = new IntersectionObserver(([entry]) => {
+        const collapsed = !entry.isIntersecting;
+        const inline = document.getElementById('home-inline-title');
+        const bar = document.getElementById('home-bar');
+        if (inline) inline.style.opacity = collapsed ? 1 : 0;
+        if (bar) bar.classList.toggle('scrolled', collapsed);
+      }, { rootMargin: '-64px 0px 0px 0px' });
+      const lt = document.getElementById('home-large-title');
+      if (lt) homeIO.observe(lt);
+    }
+
+    // Silent refetch for pull-to-refresh — no "Loading…" wipe.
+    async function refreshHome() {
+      const { lists } = await api('/api/lists');
+      if (current) return; // navigated into a list mid-fetch
+      renderHome(lists);
     }
 
     async function newList() {
@@ -514,16 +861,19 @@
     async function loadList(id) {
       searchQuery = ''; // a freshly opened list always starts unfiltered
       const app = document.getElementById('app');
-      app.innerHTML = '<p class="text-zinc-500 text-sm py-8 text-center">Loading…</p>';
+      const type = lastScreen === 'home' ? 'push' : 'none';
+      if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
       try {
         current = await api('/api/lists/' + id);
       } catch (e) {
         disconnectEvents();
-        app.innerHTML = `<p class="text-red-500 dark:text-red-400 text-sm py-8 text-center">${esc(e.message)}</p>
-          <p class="text-center"><a href="#/" class="text-violet-600 dark:text-violet-400 text-sm">← Back to My Lists</a></p>`;
+        app.innerHTML = `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
+          <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
+        lastScreen = 'list';
         return;
       }
-      renderList(current);
+      renderScreen(() => renderList(current), type);
+      lastScreen = 'list';
       connectEvents(current.list.id);
     }
 
@@ -584,82 +934,182 @@
       return html;
     }
 
+    // Menu items shared by the desktop dropdown and the touch bottom sheet.
+    function drawerItemsHtml(isOwner, sheet) {
+      const c = sheet ? 'sheet-row row-press' : DRAWER_ITEM;
+      return `
+        <label class="${c} cursor-pointer">
+          <span>Show completed</span>
+          <input type="checkbox" class="ios-switch" ${showCompleted() ? 'checked' : ''} onchange="setShowCompleted(this.checked)">
+        </label>
+        <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
+        <button onclick="closeDrawer(); openImport('merge')" class="${c}">Import markdown</button>
+        <button onclick="cycleTheme()" data-theme-label class="${c}">Theme: ${themeLabel()}</button>
+        ${isOwner ? `<button onclick="closeDrawer(); deleteList()" class="${c}" style="color: var(--danger)">Delete list</button>` : ''}
+      `;
+    }
+
     function renderList(d) {
       const isOwner = d.role === 'owner';
       const app = document.getElementById('app');
       app.innerHTML = `
-        <header class="sticky top-0 z-20 bg-zinc-100 dark:bg-zinc-950 flex items-center gap-2 pt-3 pb-6 flex-wrap">
-          <a href="#/" class="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 px-1 text-lg" title="Back">←</a>
-          <h1 class="${isOwner ? 'pencil-host cursor-pointer hover:text-violet-600 dark:hover:text-violet-300' : ''} text-xl font-bold flex-1 truncate"
-              ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}${isOwner ? ' <span class="pencil text-zinc-400 dark:text-zinc-500 text-sm font-normal">✎</span>' : ''}</h1>
-          ${d.members.length === 0 ? `
-          <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
-                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 inline-flex items-center gap-1.5">
-            ${lockSvg(12)} Private
-          </button>` : `
-          <button onclick="openMembers()" title="Members"
-                  class="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300">
-            👥 ${1 + d.members.length}
-          </button>`}
-          <div id="drawer-wrap" class="relative shrink-0">
-            <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu"
-                    class="px-2.5 py-[7px] rounded-lg border border-zinc-300 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="block"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
-            </button>
-            <div id="drawer" class="hidden absolute right-0 top-full mt-1 w-56 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xl z-30 py-1.5">
-              <button onclick="closeDrawer(); setShowCompleted(true)" class="${DRAWER_ITEM}">✓&nbsp; Show all done</button>
-              <button onclick="closeDrawer(); setShowCompleted(false)" class="${DRAWER_ITEM}">⊘&nbsp; Hide all done</button>
-              <div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
-              <button onclick="closeDrawer(); openExport()" class="${DRAWER_ITEM}">⤓&nbsp; Export markdown</button>
-              <button onclick="closeDrawer(); openImport('merge')" class="${DRAWER_ITEM}">⤒&nbsp; Import markdown</button>
-              <button onclick="cycleTheme()" id="theme-btn" class="${DRAWER_ITEM}">Theme: ${themeLabel()}</button>
-              ${isOwner ? `
-              <div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
-              <button onclick="closeDrawer(); deleteList()" class="${DRAWER_ITEM} !text-red-500 dark:!text-red-400">✕&nbsp; Delete list</button>` : ''}
+        <header id="list-bar" class="nav-bar scrolled safe-top sticky top-0 z-20 -mx-4 px-2 relative">
+          <div class="h-12 flex items-center justify-between gap-1">
+            <a href="#/" title="Back to My Lists" class="tinted flex items-center text-[17px] pl-1.5 pr-2 py-1.5 shrink-0">
+              <svg width="11" height="19" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mr-1"><path d="M10 2 3 10l7 8"/></svg>
+              Lists
+            </a>
+            <h1 id="list-title" class="nav-title absolute left-1/2 -translate-x-1/2 max-w-[44%] truncate text-center${isOwner ? ' cursor-pointer' : ''}"
+                ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
+            <div class="flex items-center shrink-0">
+              ${d.members.length === 0 ? `
+              <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
+                      class="tinted px-2.5 py-2.5">${lockSvg(16)}</button>` : `
+              <button onclick="openMembers()" title="Members" class="tinted text-[15px] px-2 py-2">👥 ${1 + d.members.length}</button>`}
+              <div id="drawer-wrap" class="relative shrink-0">
+                <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu" class="tinted px-2.5 py-2.5">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="block"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+                </button>
+                <div id="drawer" class="hidden absolute right-0 top-full mt-1 w-64 rounded-xl surface shadow-2xl z-30 py-1 overflow-hidden" style="border: 1px solid var(--separator)">
+                  ${drawerItemsHtml(isOwner, false)}
+                </div>
+              </div>
             </div>
           </div>
         </header>
 
-        <div class="relative mb-4">
+        <div class="relative my-3">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-               class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-600 pointer-events-none"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+               class="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style="color: var(--label2)"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
           <input id="search-input" type="text" autocomplete="off" enterkeyhint="search" placeholder="Search items…"
                  value="${esc(searchQuery)}"
                  oninput="onSearchInput(this.value)"
                  onkeydown="if (event.key === 'Escape') clearSearch()"
-                 class="w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl pl-9 pr-9 py-2 text-sm text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+                 class="w-full rounded-[10px] pl-9 pr-9 py-2 text-[15px] focus:outline-none"
+                 style="background: var(--fill); color: var(--label)">
           <button id="search-clear" onclick="clearSearch()" title="Clear search" aria-label="Clear search"
-                  class="${searchQuery ? '' : 'hidden '}absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-sm px-1.5 py-0.5 leading-none">✕</button>
+                  class="${searchQuery ? '' : 'hidden '}absolute right-2 top-1/2 -translate-y-1/2 text-sm px-1.5 py-0.5 leading-none" style="color: var(--label2)">✕</button>
         </div>
 
         <div id="cats">
           ${renderCats()}
         </div>
 
-        <form id="new-cat-form" onsubmit="return addCategory(event)" class="${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-1.5 px-0.5">
-          <span class="text-zinc-400 dark:text-zinc-600 text-sm select-none">+</span>
+        <form id="new-cat-form" onsubmit="return addCategory(event)" class="${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-2 px-4">
+          <span class="tinted text-[18px] leading-none select-none">+</span>
           <input name="name" placeholder="New category…" autocomplete="off" enterkeyhint="done"
                  onblur="commitOnBlur(event)"
-                 class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
+                 class="flex-1 bg-transparent text-[15px] focus:outline-none py-1.5" style="color: var(--label)">
         </form>
       `;
     }
 
-    // --- drawer ------------------------------------------------------------------
+    // --- ☰ menu: anchored dropdown on desktop, bottom sheet on touch ------------
     function toggleDrawer(ev) {
       ev.stopPropagation();
+      if (IS_TOUCH) return openMenuSheet();
       const d = document.getElementById('drawer');
       if (d) d.classList.toggle('hidden');
     }
     function closeDrawer() {
       const d = document.getElementById('drawer');
       if (d) d.classList.add('hidden');
+      closeMenuSheet();
     }
     document.addEventListener('click', e => {
       const d = document.getElementById('drawer');
       if (d && !d.classList.contains('hidden') && !e.target.closest('#drawer-wrap')) closeDrawer();
       if (openSwipe && !suppressTap && !e.target.closest('.swipe-actions')) closeOpenSwipe();
     });
+
+    // Bottom sheet: spring presentation, 1:1 drag, velocity-projected dismiss.
+    const menuSheet = { spring: null, y: 0, v: 0, open: false };
+    function sheetH() { return document.getElementById('menu-sheet').offsetHeight + 24; }
+    function setSheetY(y) {
+      menuSheet.y = y;
+      document.getElementById('menu-sheet').style.transform = 'translateY(' + Math.max(-8, y) + 'px)';
+    }
+    function openMenuSheet() {
+      document.getElementById('menu-sheet-body').innerHTML =
+        drawerItemsHtml(!!current && current.role === 'owner', true);
+      document.getElementById('sheet-backdrop').classList.remove('hidden');
+      document.getElementById('menu-sheet').classList.remove('hidden');
+      menuSheet.open = true;
+      const h = sheetH();
+      setSheetY(h);
+      if (menuSheet.spring) menuSheet.spring.stop();
+      menuSheet.spring = spring(setSheetY, {
+        from: h, to: 0, stiffness: 380, damping: 34,
+        onRest: () => { menuSheet.spring = null; },
+      });
+    }
+    function closeMenuSheet(velocity) {
+      if (!menuSheet.open) return;
+      menuSheet.open = false;
+      if (menuSheet.spring) menuSheet.spring.stop();
+      menuSheet.spring = spring(setSheetY, {
+        from: menuSheet.y, to: sheetH() + 40, velocity: velocity || 0, stiffness: 380, damping: 40,
+        onRest: () => {
+          menuSheet.spring = null;
+          document.getElementById('sheet-backdrop').classList.add('hidden');
+          document.getElementById('menu-sheet').classList.add('hidden');
+        },
+      });
+    }
+    (function wireMenuSheet() {
+      const panel = document.getElementById('menu-sheet');
+      document.getElementById('sheet-backdrop').addEventListener('click', () => closeMenuSheet());
+      let drag = null, dragged = false;
+      panel.addEventListener('touchstart', e => {
+        if (!menuSheet.open || e.touches.length !== 1) return;
+        let base = menuSheet.y, seedV = 0;
+        if (menuSheet.spring) { // catch the sheet mid-spring
+          const c = menuSheet.spring.current();
+          menuSheet.spring.stop(); menuSheet.spring = null;
+          base = c.x; seedV = c.v;
+          setSheetY(base);
+        }
+        drag = {
+          startY: e.touches[0].clientY, base,
+          samples: [{ t: e.timeStamp - 16, x: base - seedV * 0.016 }, { t: e.timeStamp, x: base }],
+        };
+        dragged = false;
+      }, { passive: true });
+      panel.addEventListener('touchmove', e => {
+        if (!drag) return;
+        e.preventDefault();
+        const dy = e.touches[0].clientY - drag.startY;
+        let y = drag.base + dy;
+        if (y < 0) y = -rubberband(-y, 40); // rubber-band upward
+        setSheetY(y);
+        if (Math.abs(dy) > 10) dragged = true;
+        drag.samples.push({ t: e.timeStamp, x: y });
+        if (drag.samples.length > 24) drag.samples.shift();
+      }, { passive: false });
+      const end = e => {
+        if (!drag) return;
+        drag.samples.push({ t: e.timeStamp, x: menuSheet.y });
+        const v = estimateVelocity(drag.samples);
+        drag = null;
+        // The suppression flag only needs to eat the click that immediately
+        // trails this drag — don't let it linger and eat a later tap.
+        setTimeout(() => { dragged = false; }, 100);
+        if (menuSheet.y + v * 0.12 > sheetH() * 0.4) { haptic(); closeMenuSheet(v); }
+        else {
+          if (menuSheet.spring) menuSheet.spring.stop();
+          menuSheet.spring = spring(setSheetY, {
+            from: menuSheet.y, to: 0, velocity: v, stiffness: 380, damping: 34,
+            onRest: () => { menuSheet.spring = null; },
+          });
+        }
+      };
+      panel.addEventListener('touchend', end, { passive: true });
+      panel.addEventListener('touchcancel', end, { passive: true });
+      // A drag that moved shouldn't also activate the row it started on.
+      panel.addEventListener('click', e => {
+        if (dragged) { e.stopPropagation(); e.preventDefault(); dragged = false; }
+      }, true);
+    })();
 
     function renderCategory(c) {
       // Active search: a matching category name shows all its items; otherwise
@@ -684,58 +1134,55 @@
       // repaintCategory outerHTML swap keeps it correct when the category's
       // completion state changes in place.
       const idx = displayCategories().findIndex(x => x.id === c.id);
-      const topGap = idx > 0 ? (fullyDone ? ' mt-3' : ' mt-7') : '';
-      const hairline = 'w-16 border-t border-zinc-300/80 dark:border-zinc-800/60';
+      const topGap = idx > 0 ? (fullyDone ? ' mt-4' : ' mt-6') : '';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" draggable="${IS_TOUCH || searching ? 'false' : 'true'}" class="cat-section${topGap}">
-          <div class="swipe-wrap relative overflow-hidden ${fullyDone ? 'mb-0.5' : 'mb-1'}">
+          <div class="swipe-wrap relative overflow-hidden mb-1.5" data-tray="136">
             <div class="swipe-actions absolute inset-y-0 right-0 flex">
-              <button onclick="renameCategory(${c.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
-              <button onclick="deleteCategory(${c.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+              <button onclick="renameCategory(${c.id})" class="w-[68px]" style="background: var(--gray)">Rename</button>
+              <button onclick="deleteCategory(${c.id})" class="w-[68px]" style="background: var(--danger)">Delete</button>
             </div>
-            <div class="swipe-front cat-head flex items-center gap-1.5 ${fullyDone ? 'pb-1' : 'pb-1.5'} border-b border-zinc-300/80 dark:border-zinc-800/60 bg-zinc-100 dark:bg-zinc-950">
+            <div class="swipe-front cat-head flex items-center gap-1.5 px-2 py-1" style="background: var(--bg)">
               ${searching ? '' : `
-              <span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none px-0.5 text-sm" title="Drag to reorder categories">⠿</span>
+              <span class="drag-handle select-none px-0.5 text-sm" style="color: var(--label3)" title="Drag to reorder categories">⠿</span>
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed items in this category"
-                      class="text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none text-[10px] px-0.5 leading-none w-3 shrink-0">
+                      class="select-none text-[10px] px-0.5 leading-none w-3 shrink-0" style="color: var(--label2)">
                 ${showDone ? '▼' : '▶'}
               </button>`}
-              <h2 class="font-semibold text-sm uppercase tracking-wide ${fullyDone ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'} flex-1 truncate cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+              <h2 class="sec-header flex-1 truncate cursor-pointer"
                   onclick="catTitleTap(event, ${c.id})" title="${IS_TOUCH ? (showDone ? 'Hide' : 'Show') + ' completed items' : 'Rename category'}">${esc(c.name)}</h2>
               ${fullyDone && !searching ? `
               <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
-                      class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
+                      class="text-[13px] select-none px-1" style="color: var(--label2)">
                 ${checked.length} done ${showDone ? '▾' : '▸'}
               </button>` : ''}
               ${searching ? '' : `
               <button onclick="toggleAdder(${c.id})" title="Add an item"
-                      class="text-zinc-400 dark:text-zinc-500 hover:text-violet-600 dark:hover:text-violet-400 text-base px-1.5 leading-none font-medium">+</button>`}
+                      class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
               <button onclick="deleteCategory(${c.id})" title="Delete category"
-                      class="cat-del text-zinc-400 dark:text-zinc-600 hover:text-red-500 dark:hover:text-red-400 text-sm px-1.5 leading-none">✕</button>
+                      class="cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
             </div>
           </div>
-          ${openAdders.has(c.id) && !searching ? `
-          <form onsubmit="return addItem(event, ${c.id})" class="mb-0.5 flex items-center gap-2 px-1">
-            <span class="text-zinc-400 dark:text-zinc-600 text-sm w-4 text-center select-none">+</span>
-            <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
-                   onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
-                   class="flex-1 bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 text-zinc-700 dark:text-zinc-300 focus:outline-none py-1.5">
-          </form>` : ''}
-          <div class="active-items space-y-0.5">
-            ${unchecked.map(renderItem).join('')}
-            ${empty ? '<p class="empty-note text-xs text-zinc-400 dark:text-zinc-600 px-1 py-1">No items yet</p>' : ''}
-          </div>
-          ${checked.length ? `
-          ${fullyDone || searching ? '' : `
-          <div class="flex items-center justify-start gap-2 my-1.5 px-1">
-            <div class="${hairline}"></div>
+          <div class="ios-card">
+            ${openAdders.has(c.id) && !searching ? `
+            <form onsubmit="return addItem(event, ${c.id})" class="card-row flex items-center gap-2.5 px-4 py-2">
+              <span class="tinted text-[18px] leading-none select-none">+</span>
+              <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
+                     onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
+                     class="flex-1 bg-transparent text-[15px] focus:outline-none py-1" style="color: var(--label)">
+            </form>` : ''}
+            <div class="active-items${unchecked.length || empty ? '' : ' hidden'}">
+              ${unchecked.map(renderItem).join('')}
+              ${empty ? '<p class="empty-note card-row text-[13px] px-4 py-2.5" style="color: var(--label2)">No items yet</p>' : ''}
+            </div>
+            ${checked.length ? `
+            ${fullyDone || searching ? '' : `
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
-                    class="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none px-1">
-              ${checked.length} done ${showDone ? '▾' : '▸'}
-            </button>
-            <div class="${hairline}"></div>
-          </div>`}
-          ${showDone ? `<div class="space-y-0.5">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
+                    class="card-row row-press w-full flex items-center justify-between px-4 py-2 text-[13px]" style="color: var(--label2)">
+              <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
+            </button>`}
+            ${showDone ? `<div class="done-items">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
+          </div>
         </section>`;
     }
 
@@ -762,23 +1209,24 @@
 
     function renderItem(i) {
       return `
-        <div class="swipe-wrap relative overflow-hidden rounded-lg">
+        <div class="swipe-wrap card-row relative overflow-hidden" data-tray="204">
           <div class="swipe-actions absolute inset-y-0 right-0 flex">
-            <button onclick="editItem(${i.id})" class="w-[68px] bg-zinc-500 text-white text-xs font-medium">Rename</button>
-            <button onclick="deleteItem(${i.id})" class="w-[68px] bg-red-500 text-white text-xs font-medium">Delete</button>
+            <button onclick="toggleItem(${i.id}, ${i.checked ? 'false' : 'true'})" class="w-[68px]" style="background: var(--tint)">${i.checked ? 'Undo' : 'Complete'}</button>
+            <button onclick="editItem(${i.id})" class="w-[68px]" style="background: var(--gray)">Rename</button>
+            <button onclick="deleteItem(${i.id})" class="act-del w-[68px]" style="background: var(--danger)">Delete</button>
           </div>
-          <div class="swipe-front item-row group flex items-center gap-2 px-1 py-1.5 rounded-lg cursor-pointer bg-zinc-100 dark:bg-zinc-950 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/40"
+          <div class="swipe-front item-row group row-press flex items-center gap-2.5 px-4 py-2.5 cursor-pointer" style="background: var(--card)"
                data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}" draggable="${IS_TOUCH || searchActive() ? 'false' : 'true'}"
                onclick="rowTap(event, ${i.id})">
-            ${searchActive() ? '' : `<span class="drag-handle text-zinc-300 hover:text-zinc-500 dark:text-zinc-700 dark:hover:text-zinc-400 select-none text-sm shrink-0" title="Drag to reorder">⠿</span>`}
+            ${searchActive() ? '' : `<span class="drag-handle select-none text-sm shrink-0" style="color: var(--label3)" title="Drag to reorder">⠿</span>`}
             <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
                    class="todo-check">
-            <span class="flex-1 text-sm break-words ${i.checked ? 'line-through text-zinc-400 dark:text-zinc-500' : ''}">${esc(i.text)}</span>
-            ${i.last_checked_by ? `<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
+            <span class="flex-1 text-[16px] break-words ${i.checked ? 'line-through' : ''}"${i.checked ? ' style="color: var(--label2)"' : ''}>${esc(i.text)}</span>
+            ${i.last_checked_by ? `<span class="shrink-0 text-[11px]" style="color: var(--label3)" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
             <button onclick="editItem(${i.id})" title="Edit"
-                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 text-xs px-1">✎</button>
+                    class="hover-action opacity-0 group-hover:opacity-100 text-xs px-1" style="color: var(--label2)">✎</button>
             <button onclick="deleteItem(${i.id})" title="Delete"
-                    class="hover-action opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs px-1">✕</button>
+                    class="hover-action opacity-0 group-hover:opacity-100 hover:!text-red-500 text-xs px-1" style="color: var(--label2)">✕</button>
           </div>
         </div>`;
     }
@@ -959,8 +1407,10 @@
       try {
         await api('/api/items/' + id, { method: 'DELETE' });
         current.items = current.items.filter(i => i.id !== id);
-        if (item) repaintCategory(item.category_id);
       } catch (e) { toast(e.message); }
+      // Repaint on failure too: a full-swipe delete already collapsed the row
+      // out of the DOM, so a failed API delete must restore it.
+      if (item) repaintCategory(item.category_id);
     }
 
     // --- drag & drop reordering -------------------------------------------------
@@ -1172,38 +1622,42 @@
     });
 
     // --- touch gestures (mobile) --------------------------------------------------
-    // Single tap toggles (via the row's click handler). Swipe left on a row or
-    // category header reveals Rename/Delete. Long-press (then move) drags to
-    // reorder — HTML5 DnD doesn't fire on touch, so this drives the same
-    // drag/dropCue state by hand.
+    // One arbiter for all four outcomes of a touch: horizontal swipe on a row,
+    // long-press drag to reorder, pull-to-refresh from the page top, or plain
+    // vertical scroll. Swipe motion is 1:1 with the finger while dragging and
+    // spring-driven (interruptible, velocity-seeded) on release — never a
+    // fixed-duration CSS transition.
     const IS_TOUCH = window.matchMedia('(hover: none) and (pointer: coarse)').matches ||
                      'ontouchstart' in window;
-    const SWIPE_W = 136;   // total width of the two revealed action buttons
-    let swipe = null;      // in-flight gesture: { wrap, front, startX, startY, dx, mode, wasOpen }
+    let swipe = null;      // in-flight swipe: { wrap, startX, startY, base, mode, samples, armed }
     let openSwipe = null;  // .swipe-wrap currently left open
     let lpTimer = null;    // long-press timer
     let touchDragging = false;
     let suppressTap = false;
 
-    // Positions the front layer and the action buttons as one unit: at
-    // offset 0 the actions sit just past the right edge (CSS default
-    // translateX(100%)); at -SWIPE_W they're fully revealed.
-    function setSwipeOffset(wrap, off, animate) {
+    function trayW(wrap) { return +wrap.dataset.tray || 136; }
+
+    // Positions the front layer and the action tray as one unit: at offset 0
+    // the tray sits just past the right edge; at -trayW it's fully revealed;
+    // past that the tray pins to the edge while the row keeps going
+    // (full-swipe territory).
+    function setSwipeOffset(wrap, off) {
+      wrap._off = off;
       const front = wrap.querySelector('.swipe-front');
       const actions = wrap.querySelector('.swipe-actions');
-      const t = animate ? '' : 'none';
-      if (front) {
-        front.style.transition = t;
-        front.style.transform = off ? 'translateX(' + off + 'px)' : '';
-      }
-      if (actions) {
-        actions.style.transition = t;
-        actions.style.transform = off ? 'translateX(' + (SWIPE_W + off) + 'px)' : '';
-      }
+      if (front) front.style.transform = off ? 'translateX(' + off + 'px)' : '';
+      if (actions) actions.style.transform = 'translateX(' + Math.max(0, trayW(wrap) + off) + 'px)';
+    }
+    function springSwipe(wrap, to, velocity, onRest) {
+      if (wrap._spring) wrap._spring.stop();
+      wrap._spring = spring(x => setSwipeOffset(wrap, x), {
+        from: wrap._off || 0, to, velocity, stiffness: 500, damping: 45,
+        onRest: () => { wrap._spring = null; if (onRest) onRest(); },
+      });
     }
     function closeOpenSwipe() {
       if (!openSwipe) return;
-      setSwipeOffset(openSwipe, 0, true);
+      if (openSwipe.isConnected) springSwipe(openSwipe, 0, 0);
       openSwipe = null;
     }
     function suppressNextTap() {
@@ -1211,15 +1665,101 @@
       setTimeout(() => { suppressTap = false; }, 350);
     }
 
+    // Full-swipe delete: slide the row off-screen with the release momentum,
+    // collapse its height, remove it, THEN do the API call (which repaints —
+    // and restores the row if the delete failed).
+    function commitFullSwipe(wrap, velocity) {
+      const row = wrap.querySelector('.item-row');
+      if (!row) return;
+      const id = +row.dataset.item;
+      if (openSwipe === wrap) openSwipe = null;
+      springSwipe(wrap, -wrap.offsetWidth - 40, Math.min(velocity, -800), () => {
+        wrap.style.height = wrap.offsetHeight + 'px';
+        requestAnimationFrame(() => {
+          wrap.classList.add('collapsing');
+          wrap.style.height = '0px';
+          let fired = false;
+          const finish = () => {
+            if (fired) return;
+            fired = true;
+            deleteItem(id);
+          };
+          wrap.addEventListener('transitionend', finish, { once: true });
+          setTimeout(finish, 350);
+        });
+      });
+    }
+
+    // Pull-to-refresh state (page-level scroller — we own the gesture, so
+    // window.scrollY is the arm condition).
+    const PTR_THRESHOLD = 70, PTR_HOLD = 56;
+    let ptr = null;          // in-flight pull: { startX, startY, active, armed, samples }
+    let ptrY = 0;
+    let ptrSpring = null;
+    let ptrRefreshing = false;
+
+    function setPull(y) {
+      ptrY = y;
+      appEl.style.transform = y ? 'translateY(' + y + 'px)' : '';
+      const puck = document.getElementById('ptr-puck');
+      const p = Math.min(1, y / PTR_THRESHOLD);
+      puck.style.opacity = p;
+      puck.style.transform = 'translate(-50%, ' + (y * 0.6 - 48) + 'px) rotate(' + y * 2 + 'deg) scale(' + (0.6 + 0.4 * p) + ')';
+    }
+    function ptrSettle(to, velocity) {
+      if (ptrSpring) ptrSpring.stop();
+      ptrSpring = spring(setPull, {
+        from: ptrY, to, velocity: velocity || 0, stiffness: 250, damping: 28,
+        onRest: () => { ptrSpring = null; },
+      });
+    }
+    function ptrMove(clientY) {
+      const raw = clientY - ptr.startY;
+      const y = raw <= 0 ? 0 : rubberband(raw, 150, 0.5);
+      setPull(y);
+      ptr.samples.push({ t: performance.now(), x: y });
+      if (ptr.samples.length > 24) ptr.samples.shift();
+      const armed = y >= PTR_THRESHOLD;
+      if (armed !== ptr.armed) {
+        ptr.armed = armed;
+        document.getElementById('ptr-puck').classList.toggle('armed', armed);
+        haptic();
+      }
+    }
+    async function startPtrRefresh(velocity) {
+      ptrRefreshing = true;
+      const puck = document.getElementById('ptr-puck');
+      puck.classList.add('refreshing');
+      ptrSettle(PTR_HOLD, velocity);
+      try { await (current ? refreshList() : refreshHome()); } catch (e) { toast(e.message); }
+      ptrRefreshing = false;
+      puck.classList.remove('refreshing', 'armed');
+      ptrSettle(0, 0);
+    }
+
     appEl.addEventListener('touchstart', e => {
-      if (!current || e.touches.length !== 1) return;
+      if (e.touches.length !== 1) return;
       const t = e.touches[0];
       const wrap = e.target.closest && e.target.closest('.swipe-wrap');
       swipe = wrap ? {
         wrap,
-        startX: t.clientX, startY: t.clientY, dx: 0, mode: null,
-        wasOpen: wrap === openSwipe,
+        startX: t.clientX, startY: t.clientY, mode: null,
+        base: wrap._off || 0, armed: false,
+        samples: [{ t: e.timeStamp, x: wrap._off || 0 }],
       } : null;
+      if (swipe && wrap._spring) {
+        // Interrupt: grab the row at its rendered position + velocity.
+        const cur = wrap._spring.current();
+        wrap._spring.stop();
+        wrap._spring = null;
+        swipe.base = cur.x;
+        swipe.samples = [{ t: e.timeStamp - 16, x: cur.x - cur.v * 0.016 }, { t: e.timeStamp, x: cur.x }];
+        setSwipeOffset(wrap, cur.x);
+      }
+      // Pull-to-refresh candidacy: page at the very top, nothing refreshing.
+      ptr = (IS_TOUCH && !ptrRefreshing && !ptrSpring && window.scrollY <= 0)
+        ? { startX: t.clientX, startY: t.clientY, active: false, armed: false, samples: [] }
+        : null;
       clearTimeout(lpTimer);
       if (e.target.closest && e.target.closest('button, input, a')) return;
       const row = e.target.closest && e.target.closest('.item-row');
@@ -1232,12 +1772,13 @@
       }
       if (info && !searchActive()) { // long-press drag is disabled while filtered too
         lpTimer = setTimeout(() => {
-          if (swipe && swipe.mode) return; // already swiping/scrolling
+          if (swipe && swipe.mode) return;       // already swiping
+          if (ptr && ptr.active) return;         // already pulling
           touchDragging = true;
           drag = info;
           info.el.classList.add('dragging');
           closeOpenSwipe();
-          if (navigator.vibrate) navigator.vibrate(10);
+          haptic();
           dragX = t.clientX; dragY = t.clientY;
           startAutoScroll();
         }, 400);
@@ -1253,30 +1794,79 @@
         cueFromPoint(el, t.clientY);
         return;
       }
-      if (!swipe) return;
-      const dx = t.clientX - swipe.startX;
-      const dy = t.clientY - swipe.startY;
-      if (!swipe.mode) {
-        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
-          swipe.mode = 'h';
-          clearTimeout(lpTimer);
-        } else if (Math.abs(dy) > 10) {
-          clearTimeout(lpTimer);
-          swipe = null; // vertical scroll — hands off
-          return;
-        } else if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
-          clearTimeout(lpTimer); // moved too much for a long-press
-        }
-      }
-      if (swipe.mode === 'h') {
+      if (ptr && ptr.active) {
         e.preventDefault();
-        const base = swipe.wasOpen ? -SWIPE_W : 0;
-        swipe.dx = Math.max(-SWIPE_W, Math.min(0, base + dx));
-        setSwipeOffset(swipe.wrap, swipe.dx, false);
+        ptrMove(t.clientY);
+        return;
+      }
+      if (swipe) {
+        const dx = t.clientX - swipe.startX;
+        const dy = t.clientY - swipe.startY;
+        if (!swipe.mode) {
+          if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+            swipe.mode = 'h';
+            clearTimeout(lpTimer);
+            ptr = null;
+          } else if (Math.abs(dy) > 10) {
+            clearTimeout(lpTimer);
+            // Vertical: pull-to-refresh claims a downward pull from the top;
+            // anything else is a plain scroll — hands off.
+            if (ptr && dy > 0 && window.scrollY <= 0) {
+              ptr.active = true;
+              ptr.startY = t.clientY;
+              swipe = null;
+              e.preventDefault();
+              ptrMove(t.clientY);
+            } else {
+              swipe = null;
+              ptr = null;
+            }
+            return;
+          } else if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+            clearTimeout(lpTimer); // moved too much for a long-press
+          }
+        }
+        if (swipe && swipe.mode === 'h') {
+          e.preventDefault();
+          const wrap = swipe.wrap;
+          const tw = trayW(wrap);
+          const isItem = !!wrap.querySelector('.item-row');
+          const raw = swipe.base + dx;
+          let off;
+          if (raw > 0) off = rubberband(raw, 40);                       // elastic give to the right
+          else if (isItem) off = raw;                                   // 1:1 into full-swipe territory
+          else off = raw >= -tw ? raw : -tw - rubberband(-(raw + tw), 60); // headers rubber-band past the tray
+          setSwipeOffset(wrap, off);
+          swipe.samples.push({ t: e.timeStamp, x: off });
+          if (swipe.samples.length > 24) swipe.samples.shift();
+          if (isItem) {
+            const armed = off <= -0.6 * wrap.offsetWidth;
+            if (armed !== swipe.armed) {
+              swipe.armed = armed;
+              wrap.classList.toggle('commit-armed', armed);
+              haptic();
+            }
+          }
+        }
+        return;
+      }
+      // No swipe row under the finger (home screen, headers, gaps): a
+      // downward pull from the top still starts pull-to-refresh.
+      if (ptr && !ptr.active) {
+        const dx = t.clientX - ptr.startX;
+        const dy = t.clientY - ptr.startY;
+        if (dy > 10 && Math.abs(dy) > Math.abs(dx) && window.scrollY <= 0) {
+          ptr.active = true;
+          ptr.startY = t.clientY;
+          e.preventDefault();
+          ptrMove(t.clientY);
+        } else if (Math.abs(dx) > 10 || dy < -10) {
+          ptr = null;
+        }
       }
     }, { passive: false });
 
-    appEl.addEventListener('touchend', () => {
+    appEl.addEventListener('touchend', e => {
       clearTimeout(lpTimer);
       if (touchDragging) {
         touchDragging = false;
@@ -1288,20 +1878,46 @@
         clearDropCue();
         if (d && cue) (d.type === 'item' ? applyItemReorder(d, cue) : applyCategoryReorder(d, cue));
         swipe = null;
+        ptr = null;
+        return;
+      }
+      if (ptr && ptr.active) {
+        ptr.samples.push({ t: performance.now(), x: ptrY });
+        const v = estimateVelocity(ptr.samples);
+        if (ptr.armed) startPtrRefresh(v);
+        else ptrSettle(0, v);
+        ptr = null;
+        swipe = null;
+        suppressNextTap();
         return;
       }
       if (swipe && swipe.mode === 'h') {
-        if (openSwipe && openSwipe !== swipe.wrap) closeOpenSwipe();
-        if (swipe.dx < -SWIPE_W / 2) {
-          setSwipeOffset(swipe.wrap, -SWIPE_W, true);
-          openSwipe = swipe.wrap;
+        const wrap = swipe.wrap;
+        const tw = trayW(wrap);
+        const isItem = !!wrap.querySelector('.item-row');
+        swipe.samples.push({ t: e.timeStamp, x: wrap._off || 0 });
+        const v = estimateVelocity(swipe.samples);
+        // Momentum commit: decide by the velocity-projected resting point, so
+        // a hard flick opens/closes without crossing the midpoint, and
+        // drifting back past the line cancels.
+        const proj = (wrap._off || 0) + v * 0.12;
+        if (openSwipe && openSwipe !== wrap) closeOpenSwipe();
+        if (isItem && swipe.armed) {
+          haptic();
+          commitFullSwipe(wrap, v);
+        } else if (proj < -tw / 2) {
+          wrap.classList.remove('commit-armed');
+          springSwipe(wrap, -tw, v);
+          openSwipe = wrap;
         } else {
-          setSwipeOffset(swipe.wrap, 0, true);
-          if (openSwipe === swipe.wrap) openSwipe = null;
+          wrap.classList.remove('commit-armed');
+          springSwipe(wrap, 0, v);
+          if (openSwipe === wrap) openSwipe = null;
         }
         suppressNextTap();
       }
       swipe = null;
+      ptr = null;
     }, { passive: true });
 
     appEl.addEventListener('touchcancel', () => {
@@ -1313,8 +1929,13 @@
         drag = null;
         clearDropCue();
       }
-      if (swipe) setSwipeOffset(swipe.wrap, swipe.wasOpen ? -SWIPE_W : 0, true);
+      if (ptr && ptr.active) ptrSettle(0, 0);
+      if (swipe && swipe.mode === 'h') {
+        swipe.wrap.classList.remove('commit-armed');
+        springSwipe(swipe.wrap, openSwipe === swipe.wrap ? -trayW(swipe.wrap) : 0, 0);
+      }
       swipe = null;
+      ptr = null;
     }, { passive: true });
 
     // Handles both same-category reorders and cross-category moves. The item
@@ -1573,7 +2194,8 @@
         ${isOwner ? `
           <form onsubmit="return inviteMember(event)" class="flex gap-2">
             <input name="username" placeholder="Invite by username…" autocomplete="off"
-                   class="flex-1 bg-zinc-100 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-600">
+                   class="flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none"
+                   style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
             <button class="text-sm px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Invite</button>
           </form>
           <p class="text-[11px] text-zinc-400 dark:text-zinc-600 mt-2">Invites take effect immediately — the user will see this list next time they open the app.</p>`
