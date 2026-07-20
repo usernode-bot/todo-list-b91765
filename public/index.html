@@ -512,6 +512,11 @@
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    // Owner-inclusive people count with singular/plural wording.
+    function memberLabel(total) {
+      return total + ' member' + (total === 1 ? '' : 's');
+    }
+
     // --- motion foundation -----------------------------------------------------
     // rAF damped-spring integrator. Interruptible: current() hands the live
     // position+velocity to whatever gesture grabs the element mid-flight.
@@ -811,7 +816,7 @@
                 </div>
                 <div class="text-[13px] mt-0.5" style="color: var(--label2)">
                   ${l.open_count} open · ${l.done_count} done
-                  ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + l.member_count + ' member' + (Number(l.member_count) > 1 ? 's' : '') : '')}
+                  ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + memberLabel(Number(l.member_count) + 1) : '')}
                 </div>
               </div>
               <span class="text-[20px] leading-none font-semibold shrink-0" style="color: var(--label3)">›</span>
@@ -1368,14 +1373,19 @@
     }
 
     async function toggleItem(id, checked) {
+      // Capture done-visibility before the mutation: checking the last open
+      // item flips the category to fully done, which defaults to collapsed.
+      const before = current.items.find(i => i.id === id);
+      const wasShowingDone = before ? catShowDone(before.category_id) : false;
       try {
         const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
-        // Checking the last open item flips the category to fully done, which
-        // defaults to collapsed — keep it expanded for this session so the
-        // rows the user is looking at don't vanish mid-interaction.
-        if (checked && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
+        // Keep a newly fully-done category expanded only if its done items
+        // were already visible, so the rows the user is looking at don't
+        // vanish mid-interaction. A category the user had collapsed stays
+        // collapsed — checking its last item must not pop it open.
+        if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
         repaintCategory(item.category_id);
       } catch (e) { toast(e.message); refreshList(); }
     }
