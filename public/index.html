@@ -203,12 +203,22 @@
     @media (hover: none) and (pointer: coarse) {
       .drag-handle, .hover-action, .cat-del { display: none !important; }
     }
-    /* Inset shadows: the rows live inside overflow-hidden cards, which clip
-       an outset shadow on the first/last row — exactly the top/bottom drop
-       positions — leaving those drops with no visible cue. */
-    .drop-before { box-shadow: inset 0 2px 0 0 #8b5cf6; }
-    .drop-after { box-shadow: inset 0 -2px 0 0 #8b5cf6; }
-    .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
+    /* Drop cues paint as overlay pseudo-elements, not box-shadows: an inset
+       shadow hides under the row's opaque .swipe-front background, and an
+       outset one is clipped by the card's overflow-hidden on the first/last
+       row — exactly the top/bottom drop positions. The bars sit inside the
+       element's bounds, above the row content (hairlines use z-index 3). */
+    .drop-before, .drop-after, .drop-into { position: relative; }
+    .drop-before::after, .drop-after::after, .drop-into::after {
+      content: ''; position: absolute; left: 0; right: 0;
+      z-index: 10; pointer-events: none;
+    }
+    .drop-before::after { top: 0; height: 3px; background: #8b5cf6; }
+    .drop-after::after { bottom: 0; height: 3px; background: #8b5cf6; }
+    .drop-into::after {
+      inset: 0; border-radius: 0.5rem;
+      box-shadow: inset 0 0 0 2px rgba(139, 92, 246, 0.6);
+    }
     .dragging { opacity: 0.4; }
 
     /* ── Reminders-style circular checkbox ── */
