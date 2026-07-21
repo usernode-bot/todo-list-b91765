@@ -203,9 +203,22 @@
     @media (hover: none) and (pointer: coarse) {
       .drag-handle, .hover-action, .cat-del { display: none !important; }
     }
-    .drop-before { box-shadow: 0 -2px 0 0 #8b5cf6; }
-    .drop-after { box-shadow: 0 2px 0 0 #8b5cf6; }
-    .drop-into { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.6); border-radius: 0.5rem; }
+    /* Drop cues paint as overlay pseudo-elements, not box-shadows: an inset
+       shadow hides under the row's opaque .swipe-front background, and an
+       outset one is clipped by the card's overflow-hidden on the first/last
+       row — exactly the top/bottom drop positions. The bars sit inside the
+       element's bounds, above the row content (hairlines use z-index 3). */
+    .drop-before, .drop-after, .drop-into { position: relative; }
+    .drop-before::after, .drop-after::after, .drop-into::after {
+      content: ''; position: absolute; left: 0; right: 0;
+      z-index: 10; pointer-events: none;
+    }
+    .drop-before::after { top: 0; height: 3px; background: #8b5cf6; }
+    .drop-after::after { bottom: 0; height: 3px; background: #8b5cf6; }
+    .drop-into::after {
+      inset: 0; border-radius: 0.5rem;
+      box-shadow: inset 0 0 0 2px rgba(139, 92, 246, 0.6);
+    }
     .dragging { opacity: 0.4; }
 
     /* ── Reminders-style circular checkbox ── */
@@ -259,6 +272,13 @@
     #ptr-puck.armed { color: var(--tint); }
     #ptr-puck.refreshing svg { animation: ptr-spin .8s linear infinite; }
     @keyframes ptr-spin { to { transform: rotate(360deg); } }
+
+    /* ── Overlay backdrops: iOS sheet/alert dims fade in and out (~0.25s
+       ease) rather than cutting. While faded out (no .show) the element is
+       still display:block for the transition, so it must not eat taps. ── */
+    .backdrop-fade { opacity: 0; transition: opacity .25s ease; }
+    .backdrop-fade.show { opacity: 1; }
+    .backdrop-fade:not(.show) { pointer-events: none; }
 
     /* ── Bottom sheets & iOS alerts ── */
     .sheet-panel {
@@ -317,7 +337,7 @@
   <div id="ptr-puck"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg></div>
 
   <!-- Members modal -->
-  <div id="modal-backdrop" class="hidden fixed inset-0 bg-black/40 dark:bg-black/60 z-40"></div>
+  <div id="modal-backdrop" class="backdrop-fade hidden fixed inset-0 bg-black/40 z-40"></div>
   <div id="members-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
     <div class="pointer-events-auto surface rounded-2xl w-full max-w-sm p-5 shadow-xl">
       <div class="flex items-center justify-between mb-4">
@@ -329,7 +349,7 @@
   </div>
 
   <!-- Markdown import/export modal -->
-  <div id="md-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 dark:bg-black/60">
+  <div id="md-modal" class="backdrop-fade hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
     <div class="surface rounded-2xl w-full max-w-lg p-5 shadow-xl flex flex-col gap-3 max-h-[90vh]">
       <div class="flex items-center justify-between">
         <h2 id="md-title" class="font-semibold text-lg"></h2>
@@ -344,7 +364,7 @@
   </div>
 
   <!-- iOS-style alert dialog (native prompt/confirm can be blocked in sandboxed iframes) -->
-  <div id="dialog" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40">
+  <div id="dialog" class="backdrop-fade hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40">
     <form id="dialog-form" class="alert-card">
       <div class="px-4 pt-5 pb-4">
         <p id="dialog-title" class="text-[15px] font-semibold text-center"></p>
@@ -357,14 +377,14 @@
   </div>
 
   <!-- iOS action sheet for destructive confirms (touch presentation) -->
-  <div id="asheet-backdrop" class="hidden fixed inset-0 z-[64] bg-black/40"></div>
+  <div id="asheet-backdrop" class="backdrop-fade hidden fixed inset-0 z-[64] bg-black/40"></div>
   <div id="asheet" class="hidden sheet-panel safe-bottom">
     <div id="asheet-actions" class="sheet-card mb-2"></div>
     <button type="button" id="asheet-cancel" class="sheet-card row-press block w-full py-3.5 text-[17px] font-semibold tinted text-center">Cancel</button>
   </div>
 
   <!-- ☰ menu as a bottom sheet on touch (drag-to-dismiss) -->
-  <div id="sheet-backdrop" class="hidden fixed inset-0 z-[63] bg-black/40"></div>
+  <div id="sheet-backdrop" class="backdrop-fade hidden fixed inset-0 z-[63] bg-black/40"></div>
   <div id="menu-sheet" class="hidden sheet-panel">
     <div class="sheet-card safe-bottom">
       <div class="sheet-grabber"></div>
@@ -400,6 +420,21 @@
       el.classList.remove('hidden');
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
+    }
+
+    // Fade an overlay backdrop in/out (.backdrop-fade). `hidden` can't
+    // transition, so show forces a reflow between un-hiding and fading, and
+    // hide keeps the element displayed until the fade-out finishes.
+    function showOverlay(el) {
+      clearTimeout(el._fadeTimer);
+      el.classList.remove('hidden');
+      void el.offsetWidth;
+      el.classList.add('show');
+    }
+    function hideOverlay(el) {
+      clearTimeout(el._fadeTimer);
+      el.classList.remove('show');
+      el._fadeTimer = setTimeout(() => el.classList.add('hidden'), 260);
     }
 
     // Shared class strings — the palette flows from the CSS variables.
@@ -440,7 +475,7 @@
         }
         btns.innerHTML = html;
         btns.className = 'grid ' + (choices && choices.length > 1 ? 'grid-cols-1' : 'grid-cols-2');
-        dialogEl.classList.remove('hidden');
+        showOverlay(dialogEl);
         if (withInput) setTimeout(() => { dialogInput.focus(); dialogInput.select(); }, 0);
       });
     }
@@ -460,7 +495,7 @@
             `<button type="button" data-as="${i}" class="row-press block w-full py-3.5 text-[17px] text-center"
                      style="${title || i ? 'border-top: 1px solid var(--separator);' : ''} color: ${c.danger ? 'var(--danger)' : 'var(--tint)'}">${esc(c.label)}</button>`
           ).join('');
-        backdrop.classList.remove('hidden');
+        showOverlay(backdrop);
         panel.classList.remove('hidden');
         const h = panel.offsetHeight + 24;
         const setY = y => { panel.style.transform = 'translateY(' + Math.max(-8, y) + 'px)'; };
@@ -472,9 +507,10 @@
           if (settled) return;
           settled = true;
           if (asheetSpring) asheetSpring.stop();
+          hideOverlay(backdrop); // fade the dim while the sheet springs away
           asheetSpring = spring(setY, {
             from: 0, to: h + 40, stiffness: 380, damping: 40,
-            onRest: () => { backdrop.classList.add('hidden'); panel.classList.add('hidden'); },
+            onRest: () => { panel.classList.add('hidden'); },
           });
           resolve(result);
         }
@@ -487,7 +523,7 @@
       });
     }
     function settleDialog(result) {
-      dialogEl.classList.add('hidden');
+      hideOverlay(dialogEl);
       if (dialogResolve) { dialogResolve(result); dialogResolve = null; dialogChoices = null; }
     }
     dialogForm.addEventListener('submit', ev => {
@@ -1032,7 +1068,7 @@
     function openMenuSheet() {
       document.getElementById('menu-sheet-body').innerHTML =
         drawerItemsHtml(!!current && current.role === 'owner', true);
-      document.getElementById('sheet-backdrop').classList.remove('hidden');
+      showOverlay(document.getElementById('sheet-backdrop'));
       document.getElementById('menu-sheet').classList.remove('hidden');
       menuSheet.open = true;
       const h = sheetH();
@@ -1047,11 +1083,11 @@
       if (!menuSheet.open) return;
       menuSheet.open = false;
       if (menuSheet.spring) menuSheet.spring.stop();
+      hideOverlay(document.getElementById('sheet-backdrop')); // fade with the slide-away
       menuSheet.spring = spring(setSheetY, {
         from: menuSheet.y, to: sheetH() + 40, velocity: velocity || 0, stiffness: 380, damping: 40,
         onRest: () => {
           menuSheet.spring = null;
-          document.getElementById('sheet-backdrop').classList.add('hidden');
           document.getElementById('menu-sheet').classList.add('hidden');
         },
       });
@@ -1549,6 +1585,34 @@
       }
     }
 
+    // Pointer inside a category but not over a row (the header, the add-item
+    // form, the "N done" toggle). Cue against the nearest visible row of the
+    // matching checked-section: above the first row's midpoint inserts at the
+    // top, below the last at the end. This is what makes dropping at the very
+    // top of a category land at the top — hovering the header used to mean
+    // "append to the end". Sections with no matching rows stay end-drops.
+    function cueWithinSection(sec, clientY) {
+      let best = null, bestDist = Infinity;
+      sec.querySelectorAll('.item-row').forEach(row => {
+        if (+row.dataset.item === drag.id) return;
+        if ((row.dataset.checked === '1') !== drag.checked) return;
+        if (!row.offsetParent) return;
+        const r = row.getBoundingClientRect();
+        const d = clientY < r.top ? r.top - clientY : clientY > r.bottom ? clientY - r.bottom : 0;
+        if (d < bestDist) { bestDist = d; best = { row, r }; }
+      });
+      clearDropCue();
+      if (!best) {
+        sec.classList.add('drop-into');
+        dropCue = { catId: +sec.dataset.cat, end: true };
+        return true;
+      }
+      const after = clientY > best.r.top + best.r.height / 2;
+      (best.row.closest('.swipe-wrap') || best.row).classList.add(after ? 'drop-after' : 'drop-before');
+      dropCue = { catId: +best.row.dataset.cat, id: +best.row.dataset.item, after };
+      return true;
+    }
+
     // Shared by desktop dragover and touch (long-press) drag. Computes the
     // drop cue for the element under the pointer; returns true when that
     // position is a valid drop target. Row cues paint on the swipe wrapper —
@@ -1573,9 +1637,7 @@
         }
         const sec = targetEl.closest('.cat-section');
         if (!sec) return nearestDropCue(clientY);
-        sec.classList.add('drop-into');
-        dropCue = { catId: +sec.dataset.cat, end: true };
-        return true;
+        return cueWithinSection(sec, clientY);
       } else {
         const sec = targetEl.closest('.cat-section');
         if (!sec) return nearestDropCue(clientY);
@@ -2068,11 +2130,11 @@
       ta.readOnly = !!readonly;
       ta.placeholder = readonly ? '' : '# **My List**\n\n* Category\n  * item\n  * ~~done item~~';
       document.getElementById('md-actions').innerHTML = actionsHtml;
-      document.getElementById('md-modal').classList.remove('hidden');
+      showOverlay(document.getElementById('md-modal'));
       if (!readonly) setTimeout(() => ta.focus(), 0);
     }
     function closeMd() {
-      document.getElementById('md-modal').classList.add('hidden');
+      hideOverlay(document.getElementById('md-modal'));
     }
     document.getElementById('md-modal').addEventListener('click', ev => {
       if (ev.target === document.getElementById('md-modal')) closeMd();
@@ -2166,12 +2228,12 @@
     // --- members modal ----------------------------------------------------------------
     function openMembers() {
       renderMembers();
-      document.getElementById('modal-backdrop').classList.remove('hidden');
-      document.getElementById('members-modal').classList.remove('hidden');
+      showOverlay(document.getElementById('modal-backdrop'));
+      showOverlay(document.getElementById('members-modal'));
     }
     function closeMembers() {
-      document.getElementById('modal-backdrop').classList.add('hidden');
-      document.getElementById('members-modal').classList.add('hidden');
+      hideOverlay(document.getElementById('modal-backdrop'));
+      hideOverlay(document.getElementById('members-modal'));
     }
     document.getElementById('modal-backdrop').addEventListener('click', closeMembers);
 
