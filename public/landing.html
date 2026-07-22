@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Todo List — yours, actually</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700;9..144,900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* Series brand — paper/ink/teal, same palette as the app itself. */
+    :root {
+      --bg: #FAF6EE; --card: #ffffff; --separator: #E7DFCC;
+      --label: #1F2B47; --label2: #5A6378; --label3: rgba(90, 99, 120, .55);
+      --fill: #F3EDDF; --tint: #2E9E8F; --tint-deep: #1f7a6d;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--label);
+      font-family: 'Inter', system-ui, sans-serif; font-size: 16px; line-height: 1.5;
+      min-height: 100vh; padding: 0 16px 64px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 480px; margin: 0 auto; }
+    header { padding: 44px 4px 20px; }
+    h1 { font-family: 'Fraunces', Georgia, serif; font-weight: 900; font-size: 34px; letter-spacing: -.5px; line-height: 1.1; }
+    .tagline { color: var(--label2); font-size: 15px; margin-top: 8px; max-width: 40ch; }
+    .cat-head {
+      font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--label2); font-weight: 600; padding: 22px 6px 7px;
+    }
+    .group { background: var(--card); border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(31,43,71,.05); }
+    .row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 11px 14px; cursor: pointer; position: relative;
+      -webkit-tap-highlight-color: transparent; user-select: none;
+    }
+    .row + .row::before {
+      content: ''; position: absolute; top: 0; left: 46px; right: 0;
+      height: 1px; background: var(--separator);
+    }
+    .row:active { background: var(--fill); }
+    .check {
+      appearance: none; -webkit-appearance: none;
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 1.5px solid var(--label3); background: transparent;
+      cursor: pointer; position: relative; flex-shrink: 0;
+      transition: background .15s, border-color .15s;
+    }
+    .check:checked { background: var(--tint); border-color: var(--tint); }
+    .check:checked::after {
+      content: ''; position: absolute; left: 6.5px; top: 3px;
+      width: 6px; height: 11px; border: solid #fff; border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+    .row span { flex: 1; }
+    .row.done span { text-decoration: line-through; color: var(--label2); }
+    .row.cta span { color: var(--tint-deep); font-weight: 700; }
+    .row.cta .check { border-color: var(--tint); }
+    .addbar {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--card); border-radius: 12px; margin-top: 22px;
+      padding: 11px 14px; box-shadow: 0 1px 2px rgba(31,43,71,.05);
+    }
+    .addbar b { color: var(--tint); font-size: 20px; font-weight: 400; line-height: 1; }
+    .addbar input {
+      flex: 1; border: none; background: transparent; outline: none;
+      font: inherit; font-size: 16px; color: var(--label);
+    }
+    .fine { color: var(--label3); font-size: 12.5px; margin-top: 18px; padding: 0 6px; }
+    .open-link { color: var(--tint-deep); font-weight: 600; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Todo List</h1>
+      <p class="tagline">A shared todo app you can make perfect for yourself. This page is the real thing — check things off, add your own.</p>
+      <p class="tagline" style="margin-top:6px">Already have an account? <a class="open-link" href="https://social-vibecoding.usernodelabs.org">Open it in Usernode</a>.</p>
+    </header>
+    <div id="list"></div>
+    <form id="addbar" class="addbar">
+      <b>+</b>
+      <input id="add-input" placeholder="Add your own item…" autocomplete="off" enterkeyhint="done">
+    </form>
+    <p class="fine">Nothing here is saved anywhere but this browser tab — your real lists start with an account, are private by default, and are yours for good.</p>
+  </div>
+
+  <script>
+    // A fully client-side demo list (spec §6.10): the pre-filled items ARE the
+    // platform pitch, one claim per checkable line. State is in-session only.
+    var KEY = 'todo:landing-demo';
+    var CTA_URL = 'https://social-vibecoding.usernodelabs.org';
+    var SEED = {
+      name: 'Welcome',
+      categories: [
+        { name: 'Try it', items: [
+          { text: 'Tap the circle — that’s the whole app', checked: false },
+          { text: 'Add something of your own below', checked: false },
+        ]},
+        { name: 'Why this one’s different', items: [
+          { text: 'No ads, ever — structurally', checked: false },
+          { text: 'This app is owned by the people who use it', checked: false },
+          { text: 'Want a feature? You can literally add it — describe it, AI builds it, members approve it', checked: false },
+          { text: 'Clone it — your copy is yours forever; nobody can take it away or make it worse', checked: false },
+          { text: 'Share lists with your people — no wallet, no crypto anything', checked: false },
+        ]},
+      ],
+    };
+
+    function load() {
+      try {
+        var s = JSON.parse(sessionStorage.getItem(KEY));
+        if (s && Array.isArray(s.categories)) return s;
+      } catch (_) {}
+      return JSON.parse(JSON.stringify(SEED));
+    }
+    var state = load();
+    function save() { try { sessionStorage.setItem(KEY, JSON.stringify(state)); } catch (_) {} }
+
+    function esc(t) {
+      return String(t).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function render() {
+      var html = '';
+      state.categories.forEach(function (cat, ci) {
+        html += '<div class="cat-head">' + esc(cat.name) + '</div><div class="group">';
+        cat.items.forEach(function (it, ii) {
+          html += '<label class="row' + (it.checked ? ' done' : '') + '">' +
+            '<input type="checkbox" class="check" data-ci="' + ci + '" data-ii="' + ii + '"' + (it.checked ? ' checked' : '') + '>' +
+            '<span>' + esc(it.text) + '</span></label>';
+        });
+        html += '</div>';
+      });
+      // The signup CTA is itself a checkable row — checking it is the tap.
+      html += '<div class="cat-head">One more</div><div class="group">' +
+        '<label class="row cta" id="cta-row"><input type="checkbox" class="check"><span>Create your account — keeps this list</span></label></div>';
+      document.getElementById('list').innerHTML = html;
+
+      document.querySelectorAll('.check[data-ci]').forEach(function (box) {
+        box.addEventListener('change', function () {
+          var it = state.categories[+box.dataset.ci].items[+box.dataset.ii];
+          it.checked = box.checked;
+          save();
+          render();
+        });
+      });
+      document.getElementById('cta-row').addEventListener('click', function (ev) {
+        ev.preventDefault();
+        // Best-effort hand-off: the app imports this as your first list when
+        // this browser shares storage with the platform's iframe.
+        try {
+          localStorage.setItem('todo:landing-list', JSON.stringify({
+            name: state.name || 'Welcome',
+            categories: state.categories.filter(function (c) { return c.items.length; }),
+          }));
+        } catch (_) {}
+        window.location.href = CTA_URL;
+      });
+    }
+
+    document.getElementById('addbar').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var input = document.getElementById('add-input');
+      var text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      state.categories[0].items.push({ text: text, checked: false });
+      save();
+      render();
+      input.focus();
+    });
+
+    render();
+  </script>
+</body>
+</html>

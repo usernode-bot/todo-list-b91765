@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700;9..144,900&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <script>
   // usernode-dev-console@1
@@ -87,19 +90,22 @@
   <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
   <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
   <style>
-    /* ── iOS system palette — violet is the tint, grays are system grays ── */
+    /* ── Series brand palette — paper/ink with the teal accent (Appendix A).
+       Destructive red stays systemRed: a safety convention, not a guilt
+       mechanic (the app has no overdue/shame styling — it's dateless). ── */
     :root {
-      --bg: #f2f2f7;                      /* systemGroupedBackground */
-      --card: #ffffff;                    /* secondarySystemGroupedBackground */
-      --separator: rgba(60, 60, 67, .29);
-      --label: #000000;
-      --label2: rgba(60, 60, 67, .6);     /* secondaryLabel */
-      --label3: rgba(60, 60, 67, .3);     /* tertiaryLabel */
-      --fill: rgba(118, 118, 128, .12);   /* search / field fills */
-      --gray: #8e8e93;                    /* systemGray — neutral swipe action */
-      --tint: #7c3aed;                    /* violet-600 */
+      --bg: #FAF6EE;                      /* paper */
+      --card: #ffffff;
+      --separator: #E7DFCC;               /* line */
+      --label: #1F2B47;                   /* ink */
+      --label2: #5A6378;                  /* ink-soft */
+      --label3: rgba(90, 99, 120, .55);
+      --fill: #F3EDDF;                    /* paper-deep — search / field fills */
+      --gray: #8e8e93;                    /* neutral swipe action */
+      --tint: #2E9E8F;                    /* teal accent */
+      --tint-deep: #1f7a6d;
       --danger: #ff3b30;                  /* systemRed */
-      --bar: rgba(242, 242, 247, .78);    /* nav-bar wash over --bg */
+      --bar: rgba(250, 246, 238, .82);    /* nav-bar wash over --bg */
 
       /* usernode-native theme overrides — route the kit through the app
          palette. Also repeated under .dark so they beat the kit's own
@@ -116,18 +122,22 @@
       --un-navbar-bg: var(--bar);
       --un-backdrop: rgba(0, 0, 0, .4);
     }
+    /* Dark mode: the spec defines no dark paper palette, so this is derived
+       from ink — a deep ink-navy ground with paper-toned labels and the teal
+       lifted one step for contrast. */
     .dark {
-      --bg: #000000;
-      --card: #1c1c1e;
-      --separator: rgba(84, 84, 88, .6);
-      --label: #ffffff;
-      --label2: rgba(235, 235, 245, .6);
-      --label3: rgba(235, 235, 245, .3);
-      --fill: rgba(118, 118, 128, .24);
+      --bg: #131a2c;
+      --card: #1d2539;
+      --separator: rgba(231, 223, 204, .18);
+      --label: #F3EDDF;
+      --label2: rgba(243, 237, 223, .62);
+      --label3: rgba(243, 237, 223, .34);
+      --fill: rgba(243, 237, 223, .1);
       --gray: #8e8e93;
-      --tint: #a78bfa;                    /* violet-400 reads better on black */
+      --tint: #46b3a3;
+      --tint-deep: #2E9E8F;
       --danger: #ff453a;
-      --bar: rgba(0, 0, 0, .78);
+      --bar: rgba(19, 26, 44, .8);
 
       --un-accent: var(--tint);
       --un-accent-contrast: #ffffff;
@@ -142,9 +152,25 @@
       --un-backdrop: rgba(0, 0, 0, .4);
     }
     html { overscroll-behavior-y: contain; }
-    body { background: var(--bg); color: var(--label); }
+    body { background: var(--bg); color: var(--label); font-family: 'Inter', system-ui, sans-serif; }
+    /* Fraunces is the editorial voice — titles only; body copy stays Inter. */
+    .un-navbar-title, .un-navbar-large { font-family: 'Fraunces', Georgia, serif; letter-spacing: -.01em; }
     .surface { background: var(--card); }
     .tinted { color: var(--tint); }
+    .btn-primary { background: var(--tint); color: #fff; }
+    .btn-primary:hover { background: var(--tint-deep); }
+    .x-close { color: var(--label3); }
+    .x-close:hover { color: var(--label); }
+
+    /* Offline status capsule — lives outside #app so re-renders never touch it. */
+    #offline-chip {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: calc(16px + env(safe-area-inset-bottom));
+      background: var(--label); color: var(--bg);
+      font-size: 12.5px; font-weight: 600; white-space: nowrap;
+      padding: 7px 14px; border-radius: 99px; z-index: 70;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, .25); pointer-events: none;
+    }
 
     .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
     .pencil-host:hover .pencil { opacity: 1; }
@@ -210,6 +236,7 @@
 </head>
 <body class="min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
+  <div id="offline-chip" class="hidden"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -220,13 +247,32 @@
     const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const headers = { 'x-client-id': clientId, ...(token ? { 'x-usernode-token': token } : {}) };
 
+    // The signed-in username, read from the platform JWT's payload — display
+    // and offline attribution only; the server never trusts it.
+    const me = (() => {
+      try {
+        return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).username || null;
+      } catch (_) { return null; }
+    })();
+
     async function api(path, opts = {}) {
-      const res = await fetch(path, {
-        ...opts,
-        headers: { 'Content-Type': 'application/json', ...headers, ...(opts.headers || {}) },
-      });
+      let res;
+      try {
+        res = await fetch(path, {
+          ...opts,
+          headers: { 'Content-Type': 'application/json', ...headers, ...(opts.headers || {}) },
+        });
+      } catch (_) {
+        // fetch itself rejected — no connection. Tag the error so callers can
+        // tell "offline" apart from a server-side rejection.
+        markOffline();
+        const err = new Error("You're offline");
+        err.network = true;
+        throw err;
+      }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ('Request failed (' + res.status + ')'));
+      if (offlineNow && !queueLength()) markOnline();
       return data;
     }
 
@@ -235,6 +281,119 @@
     function toast(msg) {
       if (window.unNative) unNative.toast(msg);
       else console.warn('[toast]', msg);
+    }
+
+    // --- offline layer --------------------------------------------------------
+    // Read cache: the last good payload of Home and of each opened list, so a
+    // dead connection shows the saved copy instead of an error screen.
+    // Mutation queue: the daily-use ops (add / toggle / edit / delete item)
+    // apply optimistically and queue while offline, then replay in order on
+    // reconnect. Everything else (reorders, categories, lists, members,
+    // import/export) stays online-only and just toasts "You're offline".
+    const QUEUE_KEY = 'todo:queue';
+
+    function cacheSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) {} }
+    function cacheGet(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (_) { return null; } }
+    function cacheList() { if (current) cacheSet('todo:cache:list:' + current.list.id, current); }
+
+    function loadQueue() { return cacheGet(QUEUE_KEY) || []; }
+    function saveQueue(q) { cacheSet(QUEUE_KEY, q); syncOfflineChip(); }
+    function queueLength() { return loadQueue().length; }
+
+    let offlineNow = false;
+    function markOffline() { offlineNow = true; syncOfflineChip(); scheduleReplay(); }
+    function markOnline() { offlineNow = false; syncOfflineChip(); }
+
+    function syncOfflineChip() {
+      const chip = document.getElementById('offline-chip');
+      if (!chip) return;
+      const n = queueLength();
+      if (!offlineNow && !n) { chip.classList.add('hidden'); return; }
+      chip.textContent = n
+        ? (offlineNow ? 'Offline — ' + n + ' change' + (n === 1 ? '' : 's') + ' will sync'
+                      : 'Syncing ' + n + ' change' + (n === 1 ? '' : 's') + '…')
+        : 'Offline — showing saved copy';
+      chip.classList.remove('hidden');
+    }
+
+    // Offline-created items get negative ids until replay maps them; seeding
+    // from the clock avoids collisions with ids left in a persisted queue.
+    let tempSeq = -(Date.now() % 1e9) - 1;
+    const isTempId = id => id < 0;
+
+    function enqueue(op) { const q = loadQueue(); q.push(op); saveQueue(q); }
+
+    // Runs a queueable mutation. Ops already waiting must stay ordered ahead
+    // of new ones, so a non-empty queue short-circuits straight to enqueue.
+    // Returns the API payload, or null when the op was queued for later.
+    async function mutate(op) {
+      if (queueLength()) { enqueue(op); attemptReplay(); return null; }
+      try {
+        return await api(op.path, {
+          method: op.method,
+          ...(op.body == null ? {} : { body: JSON.stringify(op.body) }),
+        });
+      } catch (e) {
+        if (e.network) { enqueue(op); return null; }
+        throw e;
+      }
+    }
+
+    let replayTimer = null, replaying = false;
+    function scheduleReplay() {
+      if (!replayTimer) replayTimer = setInterval(attemptReplay, 15000);
+    }
+
+    async function attemptReplay() {
+      if (replaying) return;
+      if (!queueLength()) {
+        if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+        return;
+      }
+      replaying = true;
+      try {
+        while (true) {
+          const q = loadQueue();
+          if (!q.length) break;
+          const op = q[0];
+          try {
+            if (op.type === 'add') {
+              const data = await api(op.path, { method: 'POST', body: JSON.stringify(op.body) });
+              // Rewrite later queued ops that reference the temp id, then
+              // drop this op — persisted so the mapping survives reloads.
+              saveQueue(loadQueue().slice(1).map(o =>
+                o.itemId === op.itemId ? { ...o, itemId: data.item.id } : o));
+              continue;
+            }
+            if (op.type === 'toggle' || op.type === 'edit') {
+              if (!isTempId(op.itemId)) {
+                await api('/api/items/' + op.itemId, { method: 'PATCH', body: JSON.stringify(op.body) });
+              }
+            } else if (op.type === 'delete') {
+              if (!isTempId(op.itemId)) {
+                await api('/api/items/' + op.itemId, { method: 'DELETE' });
+              }
+            }
+            saveQueue(loadQueue().slice(1));
+          } catch (e) {
+            if (e.network) return; // still offline — the timer retries
+            saveQueue(loadQueue().slice(1)); // server rejected (e.g. deleted elsewhere) — drop and move on
+          }
+        }
+        markOnline();
+        if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+        if (current) refreshList(); else refreshHome();
+      } finally { replaying = false; }
+    }
+    window.addEventListener('online', attemptReplay);
+
+    // Local stand-in for the server's insert (top of the unchecked section).
+    function offlineNewItem(id, categoryId, text) {
+      const min = current.items
+        .filter(i => i.category_id === categoryId && !i.checked)
+        .reduce((m, i) => Math.min(m, i.sort_order), 1);
+      return { id, category_id: categoryId, text, checked: false, sort_order: min - 1,
+               completed_at: null, created_by: me, last_checked_by: null };
     }
 
     // Platform detection from the kit's html classes; fall back to media
@@ -509,7 +668,17 @@
       let lists;
       try {
         ({ lists } = await api('/api/lists'));
+        lists = await maybeImportLandingList(lists);
+        cacheSet('todo:cache:home', lists);
       } catch (e) {
+        // Offline: fall back to the last good copy instead of an error screen.
+        const cached = e.network ? cacheGet('todo:cache:home') : null;
+        if (cached) {
+          if (current) return;
+          renderScreen(() => renderHome(cached), type);
+          lastScreen = 'home';
+          return;
+        }
         app.innerHTML = '<p class="text-red-500 text-sm py-8 text-center">' + esc(e.message) + '</p>';
         lastScreen = 'home';
         return;
@@ -519,12 +688,44 @@
       lastScreen = 'home';
     }
 
+    // Best-effort landing-page hand-off: the public landing page stashes its
+    // demo list under this key when the visitor taps "Create your account".
+    // If this browser shares storage with the platform iframe, a brand-new
+    // account's first Home load turns it into their first real list.
+    async function maybeImportLandingList(lists) {
+      const raw = localStorage.getItem('todo:landing-list');
+      if (!raw || lists.length) return lists;
+      let payload = null;
+      try { payload = JSON.parse(raw); } catch (_) {}
+      if (!payload || !Array.isArray(payload.categories) || !payload.categories.length) {
+        localStorage.removeItem('todo:landing-list');
+        return lists;
+      }
+      try {
+        await api('/api/lists/import', {
+          method: 'POST',
+          body: JSON.stringify({ name: payload.name || 'Welcome', categories: payload.categories }),
+        });
+        localStorage.removeItem('todo:landing-list');
+        return (await api('/api/lists')).lists;
+      } catch (_) { return lists; } // keep the key; retried on a later load
+    }
+
     function homeBadge(l) {
       if (!l.is_owner) return '<span class="shrink-0 text-[11px] uppercase tracking-wide px-1.5 py-0.5 rounded" style="color: var(--label2); background: var(--fill)">Shared</span>';
       if (Number(l.member_count) === 0) {
         return '<span title="Private — only you can see this list" class="shrink-0 inline-flex items-center gap-1 text-[11px] uppercase tracking-wide px-1.5 py-0.5 rounded" style="color: var(--label2); background: var(--fill)">' + lockSvg(10) + 'Private</span>';
       }
       return '<span class="shrink-0 text-[11px] uppercase tracking-wide tinted px-1.5 py-0.5 rounded" style="background: var(--fill)">Owner</span>';
+    }
+
+    // Recent shared-list activity by someone else — the passive re-engagement
+    // hint ("@sam checked "Dish soap"") under the counts line.
+    function activityLine(l) {
+      const a = l.activity;
+      if (!a || !a.actor) return '';
+      const t = a.text.length > 44 ? a.text.slice(0, 43) + '…' : a.text;
+      return `<div class="text-[13px] mt-0.5 truncate tinted">@${esc(a.actor)} ${a.verb === 'added' ? 'added' : 'checked'} “${esc(t)}”</div>`;
     }
 
     function renderHome(lists) {
@@ -557,6 +758,7 @@
                   ${l.open_count} open · ${l.done_count} done
                   ${!l.is_owner ? ' · by @' + esc(l.owner_username) : (Number(l.member_count) ? ' · ' + memberLabel(Number(l.member_count) + 1) : '')}
                 </div>
+                ${activityLine(l)}
               </div>
               <span class="text-[20px] leading-none font-semibold shrink-0" style="color: var(--label3)">›</span>
             </div>
@@ -571,9 +773,14 @@
 
     // Silent refetch for pull-to-refresh — no "Loading…" wipe.
     async function refreshHome() {
-      const { lists } = await api('/api/lists');
-      if (current) return; // navigated into a list mid-fetch
-      renderHome(lists);
+      try {
+        const { lists } = await api('/api/lists');
+        cacheSet('todo:cache:home', lists);
+        if (current) return; // navigated into a list mid-fetch
+        renderHome(lists);
+      } catch (e) {
+        if (!e.network) toast(e.message);
+      }
     }
 
     async function newList() {
@@ -593,12 +800,19 @@
       if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
       try {
         current = await api('/api/lists/' + id);
+        cacheList();
       } catch (e) {
-        disconnectEvents();
-        app.innerHTML = `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
-          <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
-        lastScreen = 'list';
-        return;
+        // Offline: render the saved copy; SSE reconnects on its own later.
+        const cached = e.network ? cacheGet('todo:cache:list:' + id) : null;
+        if (cached) {
+          current = cached;
+        } else {
+          disconnectEvents();
+          app.innerHTML = `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
+            <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
+          lastScreen = 'list';
+          return;
+        }
       }
       renderScreen(() => renderList(current), type);
       lastScreen = 'list';
@@ -616,11 +830,14 @@
         const data = await api('/api/lists/' + id);
         if (!current || current.list.id !== id) return; // navigated away mid-fetch
         current = data;
+        cacheList();
         const ae = document.activeElement;
         let focus = null;
         if (ae && ae.tagName === 'INPUT') {
           if (ae.id === 'search-input') {
             focus = { sel: '#search-input', value: ae.value, pos: ae.selectionStart };
+          } else if (ae.name === 'text' && ae.closest('#quick-add-form')) {
+            focus = { sel: '#quick-add-form input[name=text]', value: ae.value, pos: ae.selectionStart };
           } else if (ae.name === 'text' && ae.closest('.cat-section')) {
             focus = { sel: '#cat-' + ae.closest('.cat-section').dataset.cat + ' input[name=text]', value: ae.value, pos: ae.selectionStart };
           } else if (ae.name === 'name') {
@@ -636,7 +853,7 @@
             try { input.setSelectionRange(focus.pos, focus.pos); } catch (_) {}
           }
         }
-      } catch (e) { toast(e.message); }
+      } catch (e) { if (!e.network) toast(e.message); }
     }
 
     // Items of one section (unchecked or checked) of a category, in order.
@@ -646,10 +863,12 @@
         .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
     }
 
-    // Display order is the manual drag order (current.categories) — static.
-    // Categories never move around based on whether their items are done.
+    // Display order is the manual drag order (current.categories) — static —
+    // except the default (uncategorized) bucket, which is always pinned first.
     function displayCategories() {
-      return current.categories;
+      return [...current.categories].sort((a, b) =>
+        ((b.is_default ? 1 : 0) - (a.is_default ? 1 : 0)) ||
+        (a.sort_order - b.sort_order) || (a.id - b.id));
     }
 
     // #cats body: all categories, or a single "no matches" note when an
@@ -657,7 +876,7 @@
     function renderCats() {
       const html = displayCategories().map(c => renderCategory(c)).join('');
       if (!html && searchActive()) {
-        return `<p class="text-sm text-zinc-500 py-8 text-center">No items match "${esc(searchQuery.trim())}"</p>`;
+        return `<p class="text-sm py-8 text-center" style="color: var(--label2)">No items match "${esc(searchQuery.trim())}"</p>`;
       }
       return html;
     }
@@ -717,6 +936,14 @@
                   class="${searchQuery ? '' : 'hidden '}absolute right-2 top-1/2 -translate-y-1/2 text-sm px-1.5 py-0.5 leading-none" style="color: var(--label2)">✕</button>
         </div>
 
+        <form id="quick-add-form" onsubmit="return quickAdd(event)"
+              class="${searchActive() ? 'hidden ' : ''}un-group flex items-center gap-2.5 px-4 py-2.5 mb-5">
+          <span class="tinted text-[20px] leading-none select-none font-light">+</span>
+          <input name="text" placeholder="Add an item…" autocomplete="off" enterkeyhint="done"
+                 onblur="commitOnBlur(event)"
+                 class="flex-1 bg-transparent text-[16px] focus:outline-none py-0.5" style="color: var(--label)">
+        </form>
+
         <div id="cats">
           ${renderCats()}
         </div>
@@ -770,7 +997,11 @@
       // restores the collapse state exactly.
       const searching = searchActive();
       const q = searchQ();
-      const catMatches = searching && c.name.toLowerCase().includes(q);
+      // The default category is the invisible "uncategorized" bucket: no
+      // header (no name, drag handle, rename or delete), pinned first, and
+      // rendered only when it has items. Its name never matches a search.
+      const isBucket = !!c.is_default;
+      const catMatches = searching && !isBucket && c.name.toLowerCase().includes(q);
       let unchecked = sectionItems(c.id, false);
       let checked = sectionItems(c.id, true);
       if (searching && !catMatches) {
@@ -780,6 +1011,7 @@
       }
       const showDone = searching ? checked.length > 0 : catShowDone(c.id);
       const empty = !unchecked.length && !checked.length;
+      if (isBucket && empty) return ''; // an empty bucket renders nothing
       const fullyDone = !unchecked.length && checked.length > 0;
       // Top margin lives on the section (not a space-y on #cats) so a
       // repaintCategory outerHTML swap keeps it correct when the category's
@@ -788,6 +1020,7 @@
       const topGap = idx > 0 ? (fullyDone ? ' mt-4' : ' mt-6') : '';
       return `
         <section id="cat-${c.id}" data-cat="${c.id}" class="cat-section${topGap}">
+          ${isBucket ? '' : `
           <div class="cat-head flex items-center gap-1.5 px-2 py-1 mb-1.5">
             ${searching ? '' : `
             <span class="drag-handle cat-drag select-none px-0.5 text-sm" style="color: var(--label3)" title="Drag to reorder categories">⠿</span>
@@ -807,7 +1040,7 @@
                     class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
             <button onclick="deleteCategory(${c.id})" title="Delete category"
                     class="cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
-          </div>
+          </div>`}
           <div class="un-group">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
@@ -821,7 +1054,7 @@
               ${empty ? '<p class="empty-note un-group-row text-[13px] px-4 py-2.5" style="color: var(--label2)">No items yet</p>' : ''}
             </div>
             ${checked.length ? `
-            ${fullyDone || searching ? '' : `
+            ${(fullyDone && !isBucket) || searching ? '' : `
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                     class="un-group-row w-full flex items-center justify-between px-4 py-2 text-[13px]" style="color: var(--label2)">
               <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
@@ -1031,6 +1264,8 @@
       if (btn) btn.classList.toggle('hidden', !searchQuery);
       const form = document.getElementById('new-cat-form');
       if (form) form.classList.toggle('hidden', searchActive());
+      const qa = document.getElementById('quick-add-form');
+      if (qa) qa.classList.toggle('hidden', searchActive());
     }
 
     // --- list actions ------------------------------------------------------------
@@ -1101,6 +1336,41 @@
     }
 
     // --- item actions ---------------------------------------------------------------
+
+    // Quick-add: the always-visible field above the list; items land in the
+    // default (uncategorized) bucket. The form lives outside #cats, so the
+    // full repaint below never disturbs its focus.
+    async function quickAdd(ev) {
+      ev.preventDefault();
+      const input = ev.target.elements.text;
+      const text = input.value.trim();
+      if (!text) return false;
+      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
+      const tempId = tempSeq--;
+      try {
+        const data = await mutate({
+          type: 'add', itemId: tempId, method: 'POST',
+          path: '/api/lists/' + current.list.id + '/items', body: { text },
+        });
+        let item;
+        if (data) {
+          item = data.item;
+          if (data.category && !current.categories.some(c => c.id === data.category.id)) {
+            current.categories.unshift(data.category); // bucket created on demand server-side
+          }
+        } else {
+          // Queued offline — a local bucket must exist to hold the item; the
+          // replay's list-level POST puts it in the right place server-side.
+          const bucket = current.categories.find(c => c.is_default) || current.categories[0];
+          item = offlineNewItem(tempId, bucket.id, text);
+        }
+        current.items.push(item);
+        cacheList();
+        repaintAllCategories();
+      } catch (e) { toast(e.message); input.value = text; }
+      return false;
+    }
+
     async function addItem(ev, categoryId) {
       ev.preventDefault();
       const input = ev.target.elements.text;
@@ -1108,9 +1378,15 @@
       if (!text) return false;
       input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       const wasFullyDone = isCatFullyDone(categoryId);
+      const tempId = tempSeq--;
       try {
-        const { item } = await api('/api/categories/' + categoryId + '/items', { method: 'POST', body: JSON.stringify({ text }) });
+        const data = await mutate({
+          type: 'add', itemId: tempId, method: 'POST',
+          path: '/api/categories/' + categoryId + '/items', body: { text },
+        });
+        const item = data ? data.item : offlineNewItem(tempId, categoryId, text);
         current.items.push(item); // server gives it the smallest sort_order → top of the active list
+        cacheList();
         if (wasFullyDone) {
           // The section was rendered compact (inline done toggle, tight
           // spacing) and is now active again — a surgical insert would leave
@@ -1140,9 +1416,27 @@
       const before = current.items.find(i => i.id === id);
       const wasShowingDone = before ? catShowDone(before.category_id) : false;
       try {
-        const { item } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ checked }) });
+        const data = await mutate({
+          type: 'toggle', itemId: id, method: 'PATCH',
+          path: '/api/items/' + id, body: { checked },
+        });
+        let item;
+        if (data) {
+          item = data.item;
+        } else {
+          // Queued offline — mirror the server's move-to-section-bottom.
+          item = current.items.find(i => i.id === id);
+          if (!item) return;
+          item.checked = checked;
+          item.completed_at = checked ? new Date().toISOString() : null;
+          item.last_checked_by = me || item.last_checked_by;
+          item.sort_order = current.items
+            .filter(i => i.category_id === item.category_id && !!i.checked === checked && i.id !== id)
+            .reduce((m, i) => Math.max(m, i.sort_order), 0) + 1;
+        }
         const idx = current.items.findIndex(i => i.id === id);
         if (idx !== -1) current.items[idx] = item;
+        cacheList();
         // Keep a newly fully-done category expanded only if its done items
         // were already visible, so the rows the user is looking at don't
         // vanish mid-interaction. A category the user had collapsed stays
@@ -1157,18 +1451,30 @@
       const text = await askText('Edit item:', item ? item.text : '');
       if (!text || !text.trim()) return;
       try {
-        const { item: updated } = await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ text: text.trim() }) });
+        const data = await mutate({
+          type: 'edit', itemId: id, method: 'PATCH',
+          path: '/api/items/' + id, body: { text: text.trim() },
+        });
         const idx = current.items.findIndex(i => i.id === id);
-        if (idx !== -1) current.items[idx] = updated;
-        repaintCategory(updated.category_id);
+        if (idx === -1) return;
+        if (data) current.items[idx] = data.item;
+        else current.items[idx] = { ...current.items[idx], text: text.trim() };
+        cacheList();
+        repaintCategory(current.items[idx].category_id);
       } catch (e) { toast(e.message); }
     }
 
     async function deleteItem(id) {
       const item = current.items.find(i => i.id === id);
       try {
-        await api('/api/items/' + id, { method: 'DELETE' });
+        if (isTempId(id)) {
+          // The item only exists in the offline queue — cancel its pending ops.
+          saveQueue(loadQueue().filter(o => o.itemId !== id));
+        } else {
+          await mutate({ type: 'delete', itemId: id, method: 'DELETE', path: '/api/items/' + id });
+        }
         current.items = current.items.filter(i => i.id !== id);
+        cacheList();
       } catch (e) { toast(e.message); }
       // Repaint on failure too: a full-swipe delete already collapsed the row
       // out of the DOM (the kit removes it before calling this handler), so a
@@ -1255,9 +1561,9 @@
       el.innerHTML = `
         <div class="flex items-center justify-between">
           <h2 class="font-semibold text-lg">${esc(title)}</h2>
-          <button onclick="closeMd()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
+          <button onclick="closeMd()" class="x-close text-xl leading-none px-1">&times;</button>
         </div>
-        <p class="text-xs text-zinc-500">${esc(hint)}</p>
+        <p class="text-xs" style="color: var(--label2)">${esc(hint)}</p>
         <textarea id="md-text" rows="14" spellcheck="false"
                   class="w-full flex-1 rounded-lg p-3 text-xs font-mono focus:outline-none resize-none"
                   style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)"></textarea>
@@ -1285,7 +1591,7 @@
         readonly: true,
         actionsHtml: `
           <button onclick="copyMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Copy</button>
-          <button onclick="downloadMd()" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Download .md</button>`,
+          <button onclick="downloadMd()" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Download .md</button>`,
       });
     }
 
@@ -1324,10 +1630,10 @@
         readonly: false,
         actionsHtml: mode === 'new' ? `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
-          <button onclick="runImport('new')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import</button>` : `
+          <button onclick="runImport('new')" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import</button>` : `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
           <button onclick="runImport('replace')" class="text-sm px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white">Import (replace)</button>
-          <button onclick="runImport('add')" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Import (add)</button>`,
+          <button onclick="runImport('add')" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import (add)</button>`,
       });
     }
 
@@ -1374,7 +1680,7 @@
       el.innerHTML = `
         <div class="flex items-center justify-between mb-4">
           <h2 class="font-semibold text-lg">Members</h2>
-          <button onclick="closeMembers()" class="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 text-xl leading-none px-1">&times;</button>
+          <button onclick="closeMembers()" class="x-close text-xl leading-none px-1">&times;</button>
         </div>
         <div id="members-body"></div>
       `;
@@ -1394,26 +1700,26 @@
       if (!body) return;
       body.innerHTML = `
         <div class="space-y-1.5 mb-4">
-          <div class="flex items-center justify-between px-2 py-1.5 rounded-lg bg-zinc-200/60 dark:bg-zinc-800/50">
+          <div class="flex items-center justify-between px-2 py-1.5 rounded-lg" style="background: var(--fill)">
             <span class="text-sm">@${esc(current.list.owner_username)}</span>
-            <span class="text-[11px] uppercase tracking-wide text-violet-600 dark:text-violet-400">Owner</span>
+            <span class="text-[11px] uppercase tracking-wide tinted">Owner</span>
           </div>
           ${current.members.map(m => `
-            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50">
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-[var(--fill)]">
               <span class="text-sm">@${esc(m.username)}</span>
-              ${isOwner ? `<button onclick="removeMember(${m.id})" class="text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 text-xs">Remove</button>` : ''}
+              ${isOwner ? `<button onclick="removeMember(${m.id})" class="x-close hover:!text-red-500 text-xs">Remove</button>` : ''}
             </div>`).join('')}
-          ${!current.members.length ? '<p class="text-xs text-zinc-400 dark:text-zinc-600 px-2 py-1 flex items-center gap-1.5">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
+          ${!current.members.length ? '<p class="text-xs px-2 py-1 flex items-center gap-1.5" style="color: var(--label3)">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
         </div>
         ${isOwner ? `
           <form onsubmit="return inviteMember(event)" class="flex gap-2">
             <input name="username" placeholder="Invite by username…" autocomplete="off"
                    class="flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none"
                    style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
-            <button class="text-sm px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white">Invite</button>
+            <button class="text-sm px-3 py-2 rounded-lg btn-primary">Invite</button>
           </form>
-          <p class="text-[11px] text-zinc-400 dark:text-zinc-600 mt-2">Invites take effect immediately — the user will see this list next time they open the app.</p>`
-        : '<p class="text-xs text-zinc-400 dark:text-zinc-600">Only the owner can manage members.</p>'}
+          <p class="text-[11px] mt-2" style="color: var(--label3)">Invites take effect immediately — the user will see this list next time they open the app.</p>`
+        : '<p class="text-xs" style="color: var(--label3)">Only the owner can manage members.</p>'}
       `;
     }
 
@@ -1442,6 +1748,8 @@
     }
 
     applyTheme();
+    syncOfflineChip();
+    if (queueLength()) { scheduleReplay(); attemptReplay(); }
     route();
 
     // Pull-to-refresh on the window scroller — attached once; the kit rubber-
