@@ -159,7 +159,9 @@ app.get('/api/lists/:id/events', async (req, res) => {
 // Lists
 // ---------------------------------------------------------------------------
 
-// Home: lists the user owns or is a member of.
+// Home: lists the user owns or is a member of. `activity` is the most
+// recent item event by someone OTHER than the requester in the last week —
+// the passive shared-list re-engagement hint rendered on the Home row.
 app.get('/api/lists', async (req, res) => {
   try {
     if (IS_STAGING) await seedDemoListFor(req.user);
@@ -170,7 +172,22 @@ app.get('/api/lists', async (req, res) => {
               (SELECT COUNT(*) FROM items i JOIN categories c ON i.category_id = c.id
                 WHERE c.list_id = l.id AND NOT i.checked) AS open_count,
               (SELECT COUNT(*) FROM items i JOIN categories c ON i.category_id = c.id
-                WHERE c.list_id = l.id AND i.checked) AS done_count
+                WHERE c.list_id = l.id AND i.checked) AS done_count,
+              (SELECT row_to_json(ev) FROM (
+                 SELECT x.actor, x.verb, x.text FROM (
+                   SELECT i.last_checked_by AS actor, 'checked' AS verb, i.text, i.completed_at AS at
+                     FROM items i JOIN categories c ON i.category_id = c.id
+                    WHERE c.list_id = l.id AND i.checked AND i.last_checked_by IS NOT NULL
+                      AND LOWER(i.last_checked_by) <> LOWER($2)
+                      AND i.completed_at > NOW() - INTERVAL '7 days'
+                   UNION ALL
+                   SELECT i.created_by AS actor, 'added' AS verb, i.text, i.created_at AS at
+                     FROM items i JOIN categories c ON i.category_id = c.id
+                    WHERE c.list_id = l.id AND i.created_by IS NOT NULL
+                      AND LOWER(i.created_by) <> LOWER($2)
+                      AND i.created_at > NOW() - INTERVAL '7 days'
+                 ) x ORDER BY x.at DESC LIMIT 1
+               ) ev) AS activity
          FROM lists l
         WHERE l.owner_id = $1
            OR EXISTS (SELECT 1 FROM list_members m WHERE m.list_id = l.id
@@ -306,15 +323,22 @@ async function importCategoriesInto(client, listId, categories, username) {
     `SELECT COALESCE(MAX(sort_order), 0) AS max FROM categories WHERE list_id = $1`, [listId]
   )).rows[0].max);
 
+  let hasDefault = (await client.query(
+    `SELECT 1 FROM categories WHERE list_id = $1 AND is_default LIMIT 1`, [listId]
+  )).rows.length > 0;
+
   for (const c of categories) {
     const key = c.name.trim().toLowerCase();
     let catId = byName.get(key);
     if (!catId) {
-      catSort++;
+      // An imported "General" becomes the list's default (uncategorized)
+      // bucket when it doesn't have one yet, so exports round-trip.
+      const asDefault = !hasDefault && key === 'general';
+      if (asDefault) hasDefault = true; else catSort++;
       const r = await client.query(
         `INSERT INTO categories (list_id, name, is_default, sort_order)
-         VALUES ($1, $2, FALSE, $3) RETURNING id`,
-        [listId, c.name.trim(), catSort]);
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [listId, c.name.trim(), asDefault, asDefault ? 0 : catSort]);
       catId = r.rows[0].id;
       byName.set(key, catId);
     }
@@ -502,10 +526,11 @@ app.post('/api/lists/:id/reorder-categories', async (req, res) => {
     if (!Array.isArray(ids) || !ids.every(n => Number.isInteger(n))) {
       return res.status(400).json({ error: 'categoryIds must be an array of ids' });
     }
+    // The default (uncategorized) bucket is pinned first and never reorders.
     await pool.query(
       `UPDATE categories c SET sort_order = x.ord
          FROM (SELECT unnest($1::int[]) AS id, generate_subscripts($1::int[], 1) AS ord) x
-        WHERE c.id = x.id AND c.list_id = $2`,
+        WHERE c.id = x.id AND c.list_id = $2 AND NOT c.is_default`,
       [ids, list.id]
     );
     notify(list.id, req);
@@ -544,6 +569,46 @@ app.post('/api/categories/:id/reorder-items', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Items (owner + members)
 // ---------------------------------------------------------------------------
+
+// The default category is the list's invisible "uncategorized" bucket.
+// Older lists can lack one (the boot migration demotes renamed defaults),
+// so it's created on demand.
+async function ensureDefaultCategory(listId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM categories WHERE list_id = $1 AND is_default ORDER BY id LIMIT 1`,
+    [listId]);
+  if (rows.length) return rows[0];
+  const { rows: created } = await pool.query(
+    `INSERT INTO categories (list_id, name, is_default, sort_order)
+     VALUES ($1, 'General', TRUE, 0) RETURNING *`,
+    [listId]);
+  return created[0];
+}
+
+// Quick-add: create an item directly on a list; it lands in the default
+// (uncategorized) bucket. Returns the category too, in case it was created
+// just now and the client doesn't know it yet.
+app.post('/api/lists/:id/items', async (req, res) => {
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+    const text = (req.body.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Item text is required' });
+    const category = await ensureDefaultCategory(list.id);
+    const { rows } = await pool.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by)
+       VALUES ($1, $2, FALSE,
+               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
+               $3)
+       RETURNING *`,
+      [category.id, text, req.user.username]
+    );
+    notify(list.id, req);
+    res.json({ item: rows[0], category });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post('/api/categories/:id/items', async (req, res) => {
   try {
@@ -634,7 +699,10 @@ app.delete('/api/items/:id', async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// index:false so `/` falls through to the auth-aware catch-all below —
+// otherwise the static middleware hands the app shell to logged-out
+// visitors, whose first API call then dies with "Not authenticated".
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 // Browsers request /favicon.ico unconditionally (no token attached). Without
 // this route it falls through to the auth-gated catch-all below and logs a
@@ -643,18 +711,12 @@ app.get('/favicon.ico', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'favicon.svg'));
 });
 
-// HTML shell: serve the app if authenticated, otherwise an "open in Usernode"
-// landing page so stray visits to the staging URL don't reveal the app.
+// HTML shell: the app for authenticated users; for everyone else the public
+// landing page — a live, client-side-only demo list whose items pitch the
+// platform (spec §6.10). No app data is ever served to it.
 app.get('*', (req, res) => {
   if (!req.user) {
-    return res.status(401).send(`<!doctype html><meta charset=utf-8><title>Open in Usernode</title>
-<body style="font-family:system-ui;background:#09090b;color:#e4e4e7;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
-  <div style="max-width:24rem;padding:2rem;text-align:center">
-    <h1 style="font-size:1.25rem;margin:0 0 0.5rem">Open this app inside Usernode</h1>
-    <p style="color:#a1a1aa;font-size:0.9rem;margin:0 0 1.25rem">This page is served via the platform; direct visits aren't authenticated.</p>
-    <a href="https://social-vibecoding.usernodelabs.org" style="display:inline-block;padding:0.5rem 1rem;background:#7c3aed;color:white;border-radius:0.5rem;text-decoration:none;font-size:0.9rem">Go to Usernode</a>
-  </div>
-</body>`);
+    return res.sendFile(path.join(__dirname, 'public', 'landing.html'));
   }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -715,9 +777,12 @@ async function seedDemoListFor(user) {
       `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
       [shared.id]
     )).rows[0];
+    // The checked row is attributed to the fake member so the Home screen's
+    // shared-list activity line ("@staging-demo-user checked …") has data.
     await client.query(
-      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
-         ($1, 'Pick up dry cleaning', FALSE, 1, NULL, $2)`,
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by) VALUES
+         ($1, 'Pick up dry cleaning', FALSE, 1, NULL, $2, NULL),
+         ($1, 'Take out recycling', TRUE, 1, NOW(), 'staging-demo-user', 'staging-demo-user')`,
       [sharedGeneral.id, user.username]
     );
     await client.query(
@@ -783,6 +848,11 @@ async function start() {
     ALTER TABLE items ADD COLUMN IF NOT EXISTS last_checked_by VARCHAR(255);
     COMMENT ON TABLE items IS 'staging:private';
     CREATE INDEX IF NOT EXISTS items_category_idx ON items (category_id);
+
+    -- The default category is now the invisible "uncategorized" bucket.
+    -- A renamed default was evidently being used as a real category, so it
+    -- keeps its visible header by losing the flag (idempotent).
+    UPDATE categories SET is_default = FALSE WHERE is_default AND name <> 'General';
   `);
   app.listen(port, () => console.log(`Listening on :${port}`));
 }
