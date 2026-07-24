@@ -163,6 +163,8 @@
     // --- auth / api ----------------------------------------------------------
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token') || '';
+    // Screenshot/test deep link (see loadShotSearch) — never affects normal use.
+    const shotSearch = params.get('shot') === 'search';
     // Random per-tab id sent with every mutation; SSE events echo it back so
     // the tab that made a change can skip refetching its own edit.
     const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -480,6 +482,8 @@
     // `current`, so each keystroke just re-renders #cats from memory.
     // Whitespace-only input counts as inactive.
     let searchQuery = '';
+    // Consumed by the next loadList() — set only by the ?shot=search deep link.
+    let pendingSearch = '';
     const searchActive = () => !!searchQuery.trim();
     const searchQ = () => searchQuery.trim().toLowerCase();
 
@@ -573,9 +577,22 @@
     function route() {
       const m = location.hash.match(/^#\/list\/(\d+)$/);
       if (m) loadList(m[1]);
+      else if (shotSearch) loadShotSearch();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
+
+    // Screenshot-state deep link — `/?shot=search` boots straight into a list
+    // with a query typed, because the clear-search button only exists mid-
+    // search and screenshots/tests can only navigate, never type. Pure UI
+    // state (no writes), so it works in every environment.
+    async function loadShotSearch() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      pendingSearch = 'a'; // matches broadly; a no-match state still shows the bar
+      loadList(lists[0].id);
+    }
 
     // --- Home / My Lists -------------------------------------------------------
     async function loadHome() {
@@ -715,7 +732,10 @@
 
     // --- List View --------------------------------------------------------------
     async function loadList(id) {
-      searchQuery = ''; // a freshly opened list always starts unfiltered
+      // A freshly opened list starts unfiltered, unless the ?shot=search deep
+      // link staged a query for this navigation.
+      searchQuery = pendingSearch;
+      pendingSearch = '';
       const app = document.getElementById('app');
       const type = lastScreen === 'home' ? 'push' : 'none';
       if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
@@ -851,10 +871,20 @@
                  value="${esc(searchQuery)}"
                  oninput="onSearchInput(this.value)"
                  onkeydown="if (event.key === 'Escape') clearSearch()"
-                 class="w-full rounded-[10px] pl-9 pr-9 py-2 text-[15px] focus:outline-none"
+                 class="w-full rounded-[10px] pl-9 pr-12 py-2.5 text-[15px] focus:outline-none"
                  style="background: var(--fill); color: var(--label)">
-          <button id="search-clear" onclick="clearSearch()" title="Clear search" aria-label="Clear search"
-                  class="${searchQuery ? '' : 'hidden '}absolute right-2 top-1/2 -translate-y-1/2 text-sm px-1.5 py-0.5 leading-none" style="color: var(--label2)">✕</button>
+          <!-- Clear-search control. The absolute positioning lives on the
+               wrapper, not the button, so the kit's .un-touch-target (which
+               needs position:relative) can't fight it: the button stays a
+               plain 34px circle in normal flow with a ≥44px invisible hit
+               area centered on it. -->
+          <div class="absolute right-1.5 top-1/2 -translate-y-1/2">
+            <button id="search-clear" onclick="clearSearch()" title="Clear search" aria-label="Clear search"
+                    class="${searchQuery ? '' : 'hidden '}un-touch-target un-pressable flex items-center justify-center w-[34px] h-[34px] rounded-full"
+                    style="background: var(--fill2); color: var(--label2)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" class="block"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
+          </div>
         </div>
 
         <form id="quick-add-form" onsubmit="return quickAdd(event)"

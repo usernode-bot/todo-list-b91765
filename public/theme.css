@@ -15,6 +15,7 @@
   --label2: #5A6378;                  /* ink-soft */
   --label3: rgba(90, 99, 120, .55);
   --fill: #F3EDDF;                    /* paper-deep — search / field fills */
+  --fill2: #E3DAC4;                   /* one step deeper — controls ON a field */
   --gray: #8e8e93;                    /* neutral swipe action */
   --tint: #2E9E8F;                    /* teal accent */
   --tint-deep: #1f7a6d;
@@ -47,6 +48,7 @@
   --label2: rgba(243, 237, 223, .62);
   --label3: rgba(243, 237, 223, .34);
   --fill: rgba(243, 237, 223, .1);
+  --fill2: rgba(243, 237, 223, .2);
   --gray: #8e8e93;
   --tint: #46b3a3;
   --tint-deep: #2E9E8F;
