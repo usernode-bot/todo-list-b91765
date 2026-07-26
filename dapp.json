@@ -6,7 +6,9 @@
     { "name": "Native kit boots", "path": "/", "expectSelector": "html.un-ios, html.un-android, html.un-desktop" },
     { "name": "Shared list counts the owner in its member count", "path": "/", "expectText": "2 members" },
     { "name": "Home shows shared-list activity", "path": "/", "expectText": "staging-demo-user checked" },
-    { "name": "Landing page renders the demo list on the shared theme", "path": "/landing.html", "expectSelector": ".un-group .todo-check", "expectText": "Create your account" }
+    { "name": "Landing page renders the demo list on the shared theme", "path": "/landing.html", "expectSelector": ".un-group .todo-check", "expectText": "Create your account" },
+    { "name": "Offline status strip renders", "path": "/?shot=offline", "expectSelector": "#offline-chip", "expectText": "showing saved copy" },
+    { "name": "Syncing status strip renders", "path": "/?shot=syncing", "expectSelector": "#offline-chip", "expectText": "Syncing 2 changes" }
   ],
   "visibility": {
     "build": "private",
