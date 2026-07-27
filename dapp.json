@@ -29,6 +29,18 @@
       "path": "/landing.html",
       "expectSelector": ".un-group .todo-check",
       "expectText": "Create your account"
+    },
+    {
+      "name": "Offline status strip renders",
+      "path": "/?shot=offline",
+      "expectSelector": "#offline-chip",
+      "expectText": "showing saved copy"
+    },
+    {
+      "name": "Syncing status strip renders",
+      "path": "/?shot=syncing",
+      "expectSelector": "#offline-chip",
+      "expectText": "Syncing 2 changes"
     }
   ],
   "visibility": {

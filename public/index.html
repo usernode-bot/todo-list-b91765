@@ -103,15 +103,32 @@
     .x-close { color: var(--label3); }
     .x-close:hover { color: var(--label); }
 
-    /* Offline status capsule — lives outside #app so re-renders never touch it. */
+    /* Offline / syncing status strip — lives outside #app so re-renders never
+       touch it. Pinned directly under the fixed nav bar; deliberately NOT at
+       the bottom, where the kit's toast HUD lives (the two used to overlap). */
     #offline-chip {
-      position: fixed; left: 50%; transform: translateX(-50%);
-      bottom: calc(16px + env(safe-area-inset-bottom));
+      position: fixed; left: 0; right: 0;
+      top: calc(3rem + env(safe-area-inset-top));
+      display: flex; align-items: center; justify-content: center;
       background: var(--label); color: var(--bg);
-      font-size: 12.5px; font-weight: 600; white-space: nowrap;
-      padding: 7px 14px; border-radius: 99px; z-index: 70;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, .25); pointer-events: none;
+      font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+      text-align: center; padding: 6px 14px; z-index: 70;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
+      pointer-events: none;
     }
+    /* Own the hidden rule rather than leaning on Tailwind's .hidden — the CDN
+       script may not be warm on the very first offline load. */
+    #offline-chip.hidden { display: none; }
+    #offline-chip.tappable { pointer-events: auto; cursor: pointer; }
+    #offline-chip.ok { background: var(--tint); color: #fff; }
+    /* Make room so the strip never covers the first row of content. */
+    body.has-strip #app { padding-top: 2.15rem; }
+
+    /* Actions that need a live connection: dimmed while offline. The handlers
+       stay wired and explain themselves with a toast when tapped. */
+    body.is-offline .needs-net { opacity: .45; }
+    body.is-offline .item-drag,
+    body.is-offline .cat-drag { opacity: .35; }
 
     .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
     .pencil-host:hover .pencil { opacity: 1; }
@@ -157,24 +174,34 @@
 </head>
 <body class="min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
-  <div id="offline-chip" class="hidden"></div>
+  <div id="offline-chip" class="hidden" role="status" aria-live="polite" onclick="onStripTap()"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token') || '';
+    // Screenshot-state deep link (?shot=offline | ?shot=syncing): a DISPLAY-ONLY
+    // override of the status strip so the offline UI — which no plain
+    // navigation can reach — is capturable. It never writes to the queue,
+    // never touches the DB, and works in every environment.
+    const shot = params.get('shot') || '';
     // Random per-tab id sent with every mutation; SSE events echo it back so
     // the tab that made a change can skip refetching its own edit.
     const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const headers = { 'x-client-id': clientId, ...(token ? { 'x-usernode-token': token } : {}) };
 
-    // The signed-in username, read from the platform JWT's payload — display
-    // and offline attribution only; the server never trusts it.
-    const me = (() => {
+    // Platform JWT payload — display, offline attribution and cache
+    // namespacing only; the server never trusts any of it.
+    const jwt = (() => {
       try {
-        return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).username || null;
+        return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       } catch (_) { return null; }
     })();
+    const me = (jwt && jwt.username) || null;
+    // Every cached payload and every queued op is namespaced by user id, so a
+    // second account on the same browser can neither see the first one's saved
+    // lists nor replay its pending changes with the wrong token.
+    const NS = 'todo:u' + (jwt && jwt.id != null ? String(jwt.id) : 'anon') + ':';
 
     async function api(path, opts = {}) {
       let res;
@@ -192,8 +219,16 @@
         throw err;
       }
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || ('Request failed (' + res.status + ')'));
-      if (offlineNow && !queueLength()) markOnline();
+      if (!res.ok) {
+        // Carry the status so the replay loop can tell a permanent rejection
+        // (the item was deleted) from one worth retrying (502, 429).
+        const err = new Error(data.error || ('Request failed (' + res.status + ')'));
+        err.status = res.status;
+        throw err;
+      }
+      // A successful call proves we're back — but never fight the replay loop
+      // for the strip while it is mid-drain.
+      if (connState === 'offline' && !replaying && !queueLength()) markOnline();
       return data;
     }
 
@@ -206,35 +241,152 @@
 
     // --- offline layer --------------------------------------------------------
     // Read cache: the last good payload of Home and of each opened list, so a
-    // dead connection shows the saved copy instead of an error screen.
+    // dead connection shows the saved copy instead of an error screen. The app
+    // shell itself is cached by /sw.js, so this survives a cold start too.
     // Mutation queue: the daily-use ops (add / toggle / edit / delete item)
     // apply optimistically and queue while offline, then replay in order on
     // reconnect. Everything else (reorders, categories, lists, members,
-    // import/export) stays online-only and just toasts "You're offline".
-    const QUEUE_KEY = 'todo:queue';
+    // import) stays online-only and says so before it is attempted.
+    const QUEUE_KEY = NS + 'queue';
+    const HOME_KEY = NS + 'cache:home';
+    const LRU_KEY = NS + 'cache:lru';
+    const listKey = id => NS + 'cache:list:' + id;
+    const MAX_CACHED_LISTS = 10;
 
-    function cacheSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) {} }
+    // Adopt the pre-namespace keys under this user, then drop every other
+    // user's namespace so a shared browser never leaks between accounts.
+    (function migrateStorage() {
+      try {
+        for (const [from, to] of [['todo:queue', QUEUE_KEY], ['todo:cache:home', HOME_KEY]]) {
+          const v = localStorage.getItem(from);
+          if (v == null) continue;
+          if (localStorage.getItem(to) == null) localStorage.setItem(to, v);
+          localStorage.removeItem(from);
+        }
+        for (const k of Object.keys(localStorage)) {
+          if (/^todo:cache:list:\d+$/.test(k)) {
+            const to = NS + k.slice('todo:'.length);
+            if (localStorage.getItem(to) == null) localStorage.setItem(to, localStorage.getItem(k));
+            localStorage.removeItem(k);
+          } else if (/^todo:u[^:]+:/.test(k) && k.indexOf(NS) !== 0) {
+            localStorage.removeItem(k);
+          }
+        }
+      } catch (_) { /* storage unavailable or full — the app still runs */ }
+    })();
+
+    function cacheSet(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch (_) { return false; }
+    }
     function cacheGet(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (_) { return null; } }
-    function cacheList() { if (current) cacheSet('todo:cache:list:' + current.list.id, current); }
+
+    // A write that must not be lost (the queue) evicts cached list payloads
+    // oldest-first — never the list on screen — and retries after each one.
+    function cacheSetOrEvict(key, val) {
+      if (cacheSet(key, val)) return true;
+      const keepId = current ? String(current.list.id) : null;
+      const lru = cacheGet(LRU_KEY) || [];
+      for (let i = lru.length - 1; i >= 0; i--) {
+        const id = String(lru[i]);
+        if (id === keepId) continue;
+        try { localStorage.removeItem(listKey(id)); } catch (_) {}
+        lru.splice(i, 1);
+        cacheSet(LRU_KEY, lru);
+        if (cacheSet(key, val)) return true;
+      }
+      try { localStorage.removeItem(HOME_KEY); } catch (_) {}
+      return cacheSet(key, val);
+    }
+
+    // Most-recently-opened list ids, newest first; the tail is what eviction
+    // and the MAX_CACHED_LISTS cap consume.
+    function touchList(id) {
+      const key = String(id);
+      const lru = [key, ...(cacheGet(LRU_KEY) || []).filter(x => String(x) !== key)];
+      for (const stale of lru.slice(MAX_CACHED_LISTS)) {
+        try { localStorage.removeItem(listKey(stale)); } catch (_) {}
+      }
+      cacheSet(LRU_KEY, lru.slice(0, MAX_CACHED_LISTS));
+    }
+
+    function cacheList() {
+      if (!current) return;
+      cacheSetOrEvict(listKey(current.list.id), current);
+      touchList(current.list.id);
+    }
 
     function loadQueue() { return cacheGet(QUEUE_KEY) || []; }
-    function saveQueue(q) { cacheSet(QUEUE_KEY, q); syncOfflineChip(); }
+    // Returns false when the change could NOT be persisted — callers must then
+    // revert their optimistic update rather than pretend it is queued.
+    function saveQueue(q) {
+      const ok = cacheSetOrEvict(QUEUE_KEY, q);
+      renderStrip();
+      return ok;
+    }
     function queueLength() { return loadQueue().length; }
 
-    let offlineNow = false;
-    function markOffline() { offlineNow = true; syncOfflineChip(); scheduleReplay(); }
-    function markOnline() { offlineNow = false; syncOfflineChip(); }
+    // 'online' | 'offline' | 'syncing' | 'blocked' ('blocked' = the server
+    // refused our token, so the queue waits for a fresh one).
+    let connState = navigator.onLine === false ? 'offline' : 'online';
+    const isOnline = () => connState !== 'offline';
+    function markOffline() {
+      if (connState !== 'offline') connState = 'offline';
+      renderStrip();
+      scheduleReplay();
+    }
+    function markOnline() { connState = 'online'; renderStrip(); }
 
-    function syncOfflineChip() {
-      const chip = document.getElementById('offline-chip');
-      if (!chip) return;
+    // Transient "All changes synced" confirmation.
+    let stripFlash = null, stripFlashTimer = null;
+    function flashSynced() {
+      stripFlash = 'All changes synced';
+      renderStrip();
+      clearTimeout(stripFlashTimer);
+      stripFlashTimer = setTimeout(() => { stripFlash = null; renderStrip(); }, 2200);
+    }
+
+    const plural = n => n + ' change' + (n === 1 ? '' : 's');
+
+    // The single source of truth for the status strip. `?shot=` short-circuits
+    // it with a fixed label so the screenshot state is deterministic.
+    function stripState() {
+      if (shot === 'offline') return { text: 'Offline — showing saved copy' };
+      if (shot === 'syncing') return { text: 'Syncing 2 changes…' };
+      if (stripFlash) return { text: stripFlash, ok: true };
       const n = queueLength();
-      if (!offlineNow && !n) { chip.classList.add('hidden'); return; }
-      chip.textContent = n
-        ? (offlineNow ? 'Offline — ' + n + ' change' + (n === 1 ? '' : 's') + ' will sync'
-                      : 'Syncing ' + n + ' change' + (n === 1 ? '' : 's') + '…')
-        : 'Offline — showing saved copy';
+      if (connState === 'blocked') return { text: "Couldn't sync — tap to retry", tap: true };
+      if (connState === 'offline') {
+        return { text: n ? 'Offline — ' + plural(n) + ' will sync' : 'Offline — showing saved copy' };
+      }
+      if (connState === 'syncing') return { text: 'Syncing ' + plural(Math.max(n, 1)) + '…' };
+      if (n) return { text: plural(n) + ' waiting to sync', tap: true };
+      return null;
+    }
+
+    function renderStrip() {
+      const chip = document.getElementById('offline-chip');
+      const st = stripState();
+      // Dimming of connection-only controls tracks the real state (or the
+      // screenshot override, which is the whole point of the shot link).
+      document.body.classList.toggle('is-offline', connState === 'offline' || shot === 'offline');
+      if (!chip) return;
+      if (!st) {
+        chip.classList.add('hidden');
+        chip.classList.remove('tappable', 'ok');
+        chip.textContent = ''; // don't leave stale text in the a11y tree
+        document.body.classList.remove('has-strip');
+        return;
+      }
+      chip.textContent = st.text;
       chip.classList.remove('hidden');
+      chip.classList.toggle('tappable', !!st.tap);
+      chip.classList.toggle('ok', !!st.ok);
+      document.body.classList.add('has-strip');
+    }
+
+    function onStripTap() {
+      const st = stripState();
+      if (st && st.tap) attemptReplay(true);
     }
 
     // Offline-created items get negative ids until replay maps them; seeding
@@ -242,7 +394,12 @@
     let tempSeq = -(Date.now() % 1e9) - 1;
     const isTempId = id => id < 0;
 
-    function enqueue(op) { const q = loadQueue(); q.push(op); saveQueue(q); }
+    const STORAGE_FULL = "Not enough storage to save this change offline.";
+    function enqueue(op) {
+      const q = loadQueue();
+      q.push(op);
+      if (!saveQueue(q)) { const e = new Error(STORAGE_FULL); e.storage = true; throw e; }
+    }
 
     // Runs a queueable mutation. Ops already waiting must stay ordered ahead
     // of new ones, so a non-empty queue short-circuits straight to enqueue.
@@ -260,53 +417,141 @@
       }
     }
 
-    let replayTimer = null, replaying = false;
-    function scheduleReplay() {
-      if (!replayTimer) replayTimer = setInterval(attemptReplay, 15000);
+    // --- replay ----------------------------------------------------------------
+    // Retry cadence: a steady 15s poll while offline, escalating backoff after a
+    // retriable server error so a struggling backend isn't hammered.
+    const REPLAY_IDLE_MS = 15000, BACKOFF_START = 5000, BACKOFF_MAX = 30000;
+    const MAX_OP_ATTEMPTS = 5;
+    let replayTimer = null, replaying = false, backoffMs = BACKOFF_START;
+
+    function scheduleReplay(delay) {
+      clearTimeout(replayTimer);
+      replayTimer = setTimeout(() => { replayTimer = null; attemptReplay(); }, delay || REPLAY_IDLE_MS);
+    }
+    function stopReplayTimer() { clearTimeout(replayTimer); replayTimer = null; }
+
+    // `navigator.onLine` only reports the interface, so confirm with the public
+    // /health endpoint before claiming we're back.
+    async function reachable() {
+      try {
+        const res = await fetch('/health', { cache: 'no-store' });
+        return res.ok;
+      } catch (_) { return false; }
     }
 
-    async function attemptReplay() {
-      if (replaying) return;
-      if (!queueLength()) {
-        if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+    // Sends one op. Consumes the queue head on success (the `add` branch also
+    // rewrites later ops that reference its temp id, persisted so the mapping
+    // survives a reload).
+    async function runOp(op) {
+      if (op.type === 'add') {
+        const data = await api(op.path, { method: 'POST', body: JSON.stringify(op.body) });
+        saveQueue(loadQueue().slice(1).map(o =>
+          o.itemId === op.itemId ? { ...o, itemId: data.item.id } : o));
         return;
       }
+      if (op.type === 'toggle' || op.type === 'edit') {
+        if (!isTempId(op.itemId)) {
+          await api('/api/items/' + op.itemId, { method: 'PATCH', body: JSON.stringify(op.body) });
+        }
+      } else if (op.type === 'delete') {
+        if (!isTempId(op.itemId)) {
+          await api('/api/items/' + op.itemId, { method: 'DELETE' });
+        }
+      }
+      saveQueue(loadQueue().slice(1));
+    }
+
+    async function attemptReplay(force) {
+      if (replaying) return;
+      if (!queueLength()) {
+        if (connState === 'blocked') markOnline();
+        // Nothing pending, but while offline keep probing so the strip clears
+        // itself the moment the connection is back — no user action needed.
+        if (connState === 'offline') {
+          if (await reachable()) markOnline();
+          else { scheduleReplay(); return; }
+        }
+        stopReplayTimer();
+        renderStrip();
+        return;
+      }
+      if (!force && navigator.onLine === false) { markOffline(); return; }
+      if (!(await reachable())) { markOffline(); return; }
+
       replaying = true;
+      connState = 'syncing';
+      renderStrip();
+      let dropped = 0, drained = false;
       try {
         while (true) {
           const q = loadQueue();
-          if (!q.length) break;
+          if (!q.length) { drained = true; break; }
           const op = q[0];
           try {
-            if (op.type === 'add') {
-              const data = await api(op.path, { method: 'POST', body: JSON.stringify(op.body) });
-              // Rewrite later queued ops that reference the temp id, then
-              // drop this op — persisted so the mapping survives reloads.
-              saveQueue(loadQueue().slice(1).map(o =>
-                o.itemId === op.itemId ? { ...o, itemId: data.item.id } : o));
+            await runOp(op);
+          } catch (e) {
+            if (e.network) { markOffline(); scheduleReplay(); return; }
+            const status = e.status || 0;
+            if (status === 401) {
+              // Token expired / not accepted — keep every op and wait for a
+              // reload inside the platform shell to mint a fresh one.
+              connState = 'blocked';
+              renderStrip();
+              scheduleReplay(BACKOFF_MAX);
+              return;
+            }
+            if (status === 429 || status >= 500) {
+              const attempts = (op.attempts || 0) + 1;
+              if (attempts < MAX_OP_ATTEMPTS) {
+                const q2 = loadQueue();
+                q2[0] = { ...op, attempts };
+                saveQueue(q2);
+                backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX);
+                connState = 'online';
+                renderStrip();
+                scheduleReplay(backoffMs);
+                return;
+              }
+              // Out of attempts: drop it rather than let a poisoned head
+              // block every later change forever.
+              dropped++;
+              saveQueue(loadQueue().slice(1));
               continue;
             }
-            if (op.type === 'toggle' || op.type === 'edit') {
-              if (!isTempId(op.itemId)) {
-                await api('/api/items/' + op.itemId, { method: 'PATCH', body: JSON.stringify(op.body) });
-              }
-            } else if (op.type === 'delete') {
-              if (!isTempId(op.itemId)) {
-                await api('/api/items/' + op.itemId, { method: 'DELETE' });
-              }
-            }
+            // 400 / 403 / 404 / 409 and friends: permanent (the item or list
+            // was deleted elsewhere, or the edit is no longer valid).
+            dropped++;
             saveQueue(loadQueue().slice(1));
-          } catch (e) {
-            if (e.network) return; // still offline — the timer retries
-            saveQueue(loadQueue().slice(1)); // server rejected (e.g. deleted elsewhere) — drop and move on
+            continue;
           }
         }
+        backoffMs = BACKOFF_START;
+        stopReplayTimer();
         markOnline();
-        if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+        if (!dropped) flashSynced();
         if (current) refreshList(); else refreshHome();
-      } finally { replaying = false; }
+      } finally {
+        replaying = false;
+        if (dropped) {
+          toast(plural(dropped) + " couldn't be applied (the item was deleted)");
+        }
+        if (!drained && connState === 'syncing') { connState = 'online'; }
+        renderStrip();
+      }
     }
-    window.addEventListener('online', attemptReplay);
+
+    window.addEventListener('online', () => attemptReplay(true));
+    window.addEventListener('offline', markOffline);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && queueLength()) attemptReplay();
+    });
+
+    // Actions with no offline path say so BEFORE they are attempted.
+    function requireOnline() {
+      if (isOnline()) return true;
+      toast("You're offline — this needs a connection.");
+      return false;
+    }
 
     // Local stand-in for the server's insert (top of the unchecked section).
     function offlineNewItem(id, categoryId, text) {
@@ -590,10 +835,10 @@
       try {
         ({ lists } = await api('/api/lists'));
         lists = await maybeImportLandingList(lists);
-        cacheSet('todo:cache:home', lists);
+        cacheSet(HOME_KEY, lists);
       } catch (e) {
         // Offline: fall back to the last good copy instead of an error screen.
-        const cached = e.network ? cacheGet('todo:cache:home') : null;
+        const cached = e.network ? cacheGet(HOME_KEY) : null;
         if (cached) {
           if (current) return;
           renderScreen(() => renderHome(cached), type);
@@ -660,8 +905,8 @@
             <button onclick="cycleTheme()" id="home-theme" title="Toggle theme (system / light / dark)"
                     class="tinted text-[15px] py-2 pr-2">${themeLabel()}</button>
             <div class="flex items-center gap-3">
-              <button onclick="openImport('new')" class="tinted text-[15px] py-2 px-1">Import</button>
-              <button onclick="newList()" title="New list" aria-label="New list" class="tinted text-[26px] font-light leading-none pl-1 py-1">+</button>
+              <button onclick="openImport('new')" class="needs-net tinted text-[15px] py-2 px-1">Import</button>
+              <button onclick="newList()" title="New list" aria-label="New list" class="needs-net tinted text-[26px] font-light leading-none pl-1 py-1">+</button>
             </div>
           </div>
         </header>
@@ -686,7 +931,7 @@
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16" style="color: var(--label2)">
              <p class="mb-3">No lists yet.</p>
-             <button onclick="newList()" class="tinted text-[15px] font-medium">Create your first list</button>
+             <button onclick="newList()" class="needs-net tinted text-[15px] font-medium">Create your first list</button>
            </div>`}
       `;
       wireNative();
@@ -696,7 +941,7 @@
     async function refreshHome() {
       try {
         const { lists } = await api('/api/lists');
-        cacheSet('todo:cache:home', lists);
+        cacheSet(HOME_KEY, lists);
         if (current) return; // navigated into a list mid-fetch
         renderHome(lists);
       } catch (e) {
@@ -705,6 +950,7 @@
     }
 
     async function newList() {
+      if (!requireOnline()) return;
       const name = await askText('List name:');
       if (!name || !name.trim()) return;
       try {
@@ -724,13 +970,22 @@
         cacheList();
       } catch (e) {
         // Offline: render the saved copy; SSE reconnects on its own later.
-        const cached = e.network ? cacheGet('todo:cache:list:' + id) : null;
+        const cached = e.network ? cacheGet(listKey(id)) : null;
         if (cached) {
           current = cached;
+          touchList(id);
         } else {
           disconnectEvents();
-          app.innerHTML = `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
-            <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
+          // A list never opened while connected has nothing to show — say that
+          // plainly instead of showing a red error.
+          app.innerHTML = e.network
+            ? `<div class="py-10 text-center">
+                 <p class="text-[15px]" style="color: var(--label2)">This list isn't available offline.</p>
+                 <p class="text-[13px] mt-1" style="color: var(--label3)">Open it once while connected and it'll be here next time.</p>
+                 <p class="mt-4"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>
+               </div>`
+            : `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
+               <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
           lastScreen = 'list';
           return;
         }
@@ -811,9 +1066,9 @@
           <input type="checkbox" class="un-switch" ${showCompleted() ? 'checked' : ''} onchange="setShowCompleted(this.checked)">
         </label>
         <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
-        <button onclick="closeDrawer(); openImport('merge')" class="${c}">Import markdown</button>
+        <button onclick="closeDrawer(); openImport('merge')" class="needs-net ${c}">Import markdown</button>
         <button onclick="cycleTheme()" data-theme-label class="${c}">Theme: ${themeLabel()}</button>
-        ${isOwner ? `<button onclick="closeDrawer(); deleteList()" class="${c}" style="color: var(--danger)">Delete list</button>` : ''}
+        ${isOwner ? `<button onclick="closeDrawer(); deleteList()" class="needs-net ${c}" style="color: var(--danger)">Delete list</button>` : ''}
       `;
     }
 
@@ -829,8 +1084,8 @@
             <div class="flex items-center shrink-0">
               ${d.members.length === 0 ? `
               <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
-                      class="tinted px-2.5 py-2.5">${lockSvg(16)}</button>` : `
-              <button onclick="openMembers()" title="Members" class="tinted text-[15px] px-2 py-2">👥 ${1 + d.members.length}</button>`}
+                      class="needs-net tinted px-2.5 py-2.5">${lockSvg(16)}</button>` : `
+              <button onclick="openMembers()" title="Members" class="needs-net tinted text-[15px] px-2 py-2">👥 ${1 + d.members.length}</button>`}
               <div id="drawer-wrap" class="relative shrink-0">
                 <button onclick="toggleDrawer(event)" title="Menu" aria-label="Menu" class="tinted px-2.5 py-2.5">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="block"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
@@ -869,7 +1124,7 @@
           ${renderCats()}
         </div>
 
-        <form id="new-cat-form" onsubmit="return addCategory(event)" class="${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-2 px-4">
+        <form id="new-cat-form" onsubmit="return addCategory(event)" class="needs-net ${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-2 px-4">
           <span class="tinted text-[18px] leading-none select-none">+</span>
           <input name="name" placeholder="New category…" autocomplete="off" enterkeyhint="done"
                  onblur="commitOnBlur(event)"
@@ -960,7 +1215,7 @@
             <button onclick="toggleAdder(${c.id})" title="Add an item"
                     class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
             <button onclick="deleteCategory(${c.id})" title="Delete category"
-                    class="cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
+                    class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
           <div class="un-group">
             ${openAdders.has(c.id) && !searching ? `
@@ -1089,11 +1344,12 @@
       // Reorder: one instance spanning every item row across all category
       // cards (indices span the matched list, so cross-category moves work)
       // and one for the category sections. Disabled while a search filters
-      // the view — visible order no longer matches stored order.
+      // the view (visible order no longer matches stored order) and while
+      // offline (reorder has no queued replay path — see revertOrder below).
       if (reorderItemsHandle) { reorderItemsHandle.detach(); reorderItemsHandle = null; }
       if (reorderCatsHandle) { reorderCatsHandle.detach(); reorderCatsHandle = null; }
       const cats = document.getElementById('cats');
-      if (cats && !searchActive()) {
+      if (cats && !searchActive() && isOnline()) {
         reorderItemsHandle = unNative.attachReorder(cats, {
           // Rows are wrapped in .un-swipe by attachSwipeActions; the
           // .empty-note placeholder makes empty categories valid drop
@@ -1149,7 +1405,16 @@
           await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ category_id: toCat }) });
         }
         await api('/api/categories/' + toCat + '/reorder-items', { method: 'POST', body: JSON.stringify({ itemIds: ids }) });
-      } catch (e) { toast(e.message); refreshList(); }
+      } catch (e) { revertOrder(e); }
+    }
+
+    // A reorder has no offline queue path, so a failed one must not linger on
+    // screen: restore the saved copy (offline) or refetch (server error).
+    function revertOrder(e) {
+      if (!e.network) { toast(e.message); refreshList(); return; }
+      toast("You're offline — reordering needs a connection.");
+      const saved = current && cacheGet(listKey(current.list.id));
+      if (saved) { current = saved; renderList(current); } else { refreshList(); }
     }
 
     function onCategoryReorder() {
@@ -1159,7 +1424,7 @@
       current.categories.forEach((c, idx) => { c.sort_order = idx; });
       repaintAllCategories();
       api('/api/lists/' + current.list.id + '/reorder-categories', { method: 'POST', body: JSON.stringify({ categoryIds: ids }) })
-        .catch(e => { toast(e.message); refreshList(); });
+        .catch(revertOrder);
     }
 
     // --- search handlers -------------------------------------------------------
@@ -1191,6 +1456,7 @@
 
     // --- list actions ------------------------------------------------------------
     async function renameList() {
+      if (!requireOnline()) return;
       const name = await askText('Rename list:', current.list.name);
       if (!name || !name.trim() || name.trim() === current.list.name) return;
       try {
@@ -1201,6 +1467,7 @@
     }
 
     async function deleteList() {
+      if (!requireOnline()) return;
       if (!await askConfirm('Delete "' + current.list.name + '" and all its items? This can\'t be undone.')) return;
       try {
         await api('/api/lists/' + current.list.id, { method: 'DELETE' });
@@ -1214,6 +1481,7 @@
       const input = ev.target.elements.name;
       const name = input.value.trim();
       if (!name) return false;
+      if (!requireOnline()) return false;
       input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
       try {
         const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
@@ -1226,6 +1494,7 @@
     }
 
     async function renameCategory(id) {
+      if (!requireOnline()) return;
       const cat = current.categories.find(c => c.id === id);
       const name = await askText('Rename category:', cat ? cat.name : '');
       if (!name || !name.trim()) return;
@@ -1238,6 +1507,7 @@
 
     // Any category can be deleted (with its items) except the last one.
     async function deleteCategory(id) {
+      if (!requireOnline()) return;
       if (current.categories.length <= 1) {
         return toast("Can't delete the only category — lists need at least one");
       }
@@ -1559,6 +1829,7 @@
     }
 
     async function runImport(mode) {
+      if (!requireOnline()) return;
       const md = document.getElementById('md-text').value;
       const { name, categories } = parseMarkdown(md);
       if (!categories.length || !categories.some(c => c.items.length)) {
@@ -1594,6 +1865,7 @@
     // in place while the modal stays open.
     let membersModal = null;
     function openMembers() {
+      if (!requireOnline()) return;
       if (!window.unNative) { toast('Members needs the UI kit, which failed to load'); return; }
       if (membersModal) { renderMembers(); return; }
       const el = document.createElement('div');
@@ -1645,6 +1917,7 @@
     }
 
     async function inviteMember(ev) {
+      if (!isOnline()) { ev.preventDefault(); requireOnline(); return false; }
       ev.preventDefault();
       const input = ev.target.elements.username;
       const username = input.value.trim();
@@ -1660,6 +1933,7 @@
     }
 
     async function removeMember(memberId) {
+      if (!requireOnline()) return;
       try {
         await api('/api/lists/' + current.list.id + '/members/' + memberId, { method: 'DELETE' });
         current = await api('/api/lists/' + current.list.id);
@@ -1669,9 +1943,30 @@
     }
 
     applyTheme();
-    syncOfflineChip();
-    if (queueLength()) { scheduleReplay(); attemptReplay(); }
+    renderStrip();
+    if (queueLength()) attemptReplay();
     route();
+
+    // --- service worker ---------------------------------------------------------
+    // Caches the app shell (and, opportunistically, the hosted CSS/JS it needs)
+    // so a cold start with no connection still boots into the saved copy.
+    // Entirely best-effort: registration is unavailable in some third-party
+    // iframe contexts, and when it fails the in-session offline layer above is
+    // unchanged. Never logs at error level — a console error would fail the
+    // platform's baseline proposal check.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(reg => {
+            try { reg.update(); } catch (_) {}
+            // Keep the offline fallback in step with deploys that change only
+            // the shell (sw.js unchanged means no activate pass).
+            const worker = reg.active || navigator.serviceWorker.controller;
+            if (worker) worker.postMessage('refresh-shell');
+          })
+          .catch(() => { /* unsupported or blocked — the app still works online */ });
+      });
+    }
 
     // Pull-to-refresh on the window scroller — attached once; the kit rubber-
     // bands #app, holds its spinner until the refresh promise settles, and
