@@ -31,6 +31,11 @@
       "expectText": "Create your account"
     },
     {
+      "name": "Search clear button renders as a large touch target",
+      "path": "/?shot=search",
+      "expectSelector": "#search-clear.un-touch-target:not(.hidden)"
+    },
+    {
       "name": "Offline status strip renders",
       "path": "/?shot=offline",
       "expectSelector": "#offline-chip",
