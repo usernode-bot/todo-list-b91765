@@ -9,6 +9,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
 const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 
+// Set by the shutdown handler at the bottom of this file; /health flips to 503
+// as soon as the container starts draining.
+let server = null;
+let shuttingDown = false;
+
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
 // Everything else requires a valid platform-issued JWT.
@@ -36,7 +41,21 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/health', (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
+  res.json({ status: 'ok' });
+});
+
+// The offline app shell's service worker. Served with no-cache so a redeployed
+// worker is always picked up (a stale HTTP-cached sw.js would pin the old
+// shell), and with Service-Worker-Allowed so it controls the whole origin.
+// Needs no auth exception — the gate above only covers non-GET and /api/*.
+app.get('/sw.js', (_req, res) => {
+  res.set('Cache-Control', 'no-cache, must-revalidate');
+  res.set('Service-Worker-Allowed', '/');
+  res.type('application/javascript');
+  res.sendFile(path.join(__dirname, 'public', 'sw.js'));
+});
 
 // ---------------------------------------------------------------------------
 // Access control
@@ -854,7 +873,41 @@ async function start() {
     -- keeps its visible header by losing the flag (idempotent).
     UPDATE categories SET is_default = FALSE WHERE is_default AND name <> 'General';
   `);
-  app.listen(port, () => console.log(`Listening on :${port}`));
+  server = app.listen(port, () => console.log(`Listening on :${port}`));
 }
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+//
+// Containers are replaced on every deploy via SIGTERM: stop accepting
+// connections, let in-flight requests finish inside a hard deadline, close the
+// pool, exit. /health reports 503 from the moment we start draining.
+// ---------------------------------------------------------------------------
+
+const DRAIN_MS = 3000;
+
+async function shutdown(signal) {
+  if (shuttingDown) return; // idempotent: SIGTERM then SIGINT must not double-run
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, draining`);
+  // Live SSE subscribers would otherwise hold the process open for the whole
+  // grace window.
+  for (const listId of Array.from(listStreams.keys())) closeListStreams(listId);
+  if (server) {
+    server.close(() => {});
+    server.closeIdleConnections?.();
+    const t = setTimeout(() => server.closeAllConnections?.(), DRAIN_MS);
+    t.unref?.();
+  }
+  try {
+    await pool.end();
+  } catch (e) {
+    console.error('[shutdown] pool.end failed', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => { console.error(err); process.exit(1); });
