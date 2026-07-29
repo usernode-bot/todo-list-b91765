@@ -158,6 +158,53 @@
       .item-drag, .hover-action, .cat-del { display: none !important; }
     }
 
+    /* ── Modals on a narrow screen ────────────────────────────────────────
+       The kit's .un-modal card already caps itself to the viewport
+       (min(480px, 100vw − 32px) wide, 100dvh − 32px − safe areas tall), so app
+       content placed inside it must never carry a viewport-relative size of
+       its own: a child wider than the card's content box is exactly what made
+       the import and members modals scroll sideways at 390px. .modal-card
+       (added by presentAppModal) keeps every modal body inside the card. */
+    .modal-card {
+      width: 100%; max-width: 100%; box-sizing: border-box;
+      /* Long unbroken strings — a pasted URL, a long @handle — wrap instead of
+         widening the card. */
+      overflow-wrap: anywhere;
+    }
+    /* Flex children default to min-width:auto, so one long word (or an input's
+       intrinsic size) is enough to push a row past the card edge. */
+    .modal-card, .modal-card * { min-width: 0; }
+
+    /* Card width overrides: safe-area aware, and the min() keeps a phone at the
+       viewport-constrained value rather than the rem width. */
+    .un-modal.modal-wide {
+      width: min(34rem, calc(100vw - 32px
+                             - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+    }
+    .un-modal.modal-narrow {
+      width: min(24rem, calc(100vw - 32px
+                             - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+    }
+
+    /* Import / export: title, hint and buttons hold still and the textarea is
+       the only scroller, so the card never needs a second scrollbar of its own.
+       The budget mirrors .un-modal's own max-height (viewport − 32px of margin
+       − safe areas − on-screen keyboard) minus its 40px of vertical padding.
+       The vh line is the fallback for engines without dvh. */
+    .md-body { max-height: calc(100vh - 72px); }
+    .md-body {
+      max-height: calc(100dvh - 72px - env(safe-area-inset-top, 0px)
+                       - env(safe-area-inset-bottom, 0px) - var(--un-kb-inset, 0px));
+    }
+    .md-body textarea { flex: 1 1 auto; min-height: 4.5rem; overflow: auto; }
+
+    /* Background page scroll lock while a modal is open — the card is the only
+       scroller. `position: fixed` on <body>, with the scroll offset preserved
+       in an inline `top`, is the form that actually holds on iOS Safari, where
+       overflow:hidden alone still pans the page behind the backdrop. */
+    html.modal-open, html.modal-open body { overflow: hidden; }
+    html.modal-open body { position: fixed; left: 0; right: 0; width: 100%; }
+
     /* Rows of the ☰ bottom-sheet content (the sheet chrome itself — grabber,
        spring, drag-dismiss — is the kit's). */
     .sheet-row {
@@ -187,6 +234,11 @@
     const shot = params.get('shot') || '';
     // Screenshot/test deep link (see loadShotSearch) — never affects normal use.
     const shotSearch = shot === 'search';
+    // Screenshot/test deep links for the two modals (see loadShotModal). Both
+    // live behind a tap, and screenshots/tests can only navigate — so without
+    // these the mobile layout of either modal is uncapturable. Pure UI state:
+    // they open a modal on an existing list and write nothing.
+    const shotModal = (shot === 'import' || shot === 'members') ? shot : '';
     // Random per-tab id sent with every mutation; SSE events echo it back so
     // the tab that made a change can skip refetching its own edit.
     const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -823,6 +875,7 @@
       const m = location.hash.match(/^#\/list\/(\d+)$/);
       if (m) loadList(m[1]);
       else if (shotSearch) loadShotSearch();
+      else if (shotModal) loadShotModal();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -837,6 +890,41 @@
       if (!lists.length) return loadHome();
       pendingSearch = 'a'; // matches broadly; a no-match state still shows the bar
       loadList(lists[0].id);
+    }
+
+    // Screenshot-state deep links — `/?shot=import` and `/?shot=members` open a
+    // list and then the corresponding modal, because both are tap-only and the
+    // capture/test harness can only navigate. Pure UI state (no writes), so
+    // they work in every environment.
+    const SHOT_IMPORT_MD = [
+      '# **Camping trip**',
+      '',
+      '* Gear',
+      '  * Sleeping bag rated to -5C, plus the compression sack it shipped in and one spare dry bag',
+      '  * Headlamp and spare batteries',
+      '* Food',
+      '  * Oatmeal packets',
+      '  * ~~Trail mix~~',
+      '',
+    ].join('\n');
+
+    async function loadShotModal() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      // Prefer a shared list so the members modal has a real member row.
+      const target = lists.find(l => Number(l.member_count) > 0) || lists[0];
+      await loadList(target.id);
+      if (!current) return; // load failed (offline / gone) — nothing to open onto
+      if (shotModal === 'import') return openImport('merge', SHOT_IMPORT_MD);
+      // A display-only extra row with a deliberately long handle, so the shot
+      // shows long usernames wrapping inside the card instead of widening it.
+      // `shot: true` keeps it out of the owner's Remove affordance.
+      current.members = current.members.concat(
+        [{ id: -1, username: 'staging-demo-user-with-a-very-long-handle', shot: true }]
+      );
+      renderList(current); // keep the header's 👥 count in step with the modal
+      openMembers();
     }
 
     // --- Home / My Lists -------------------------------------------------------
@@ -1771,33 +1859,78 @@
       return { name, categories };
     }
 
+    // --- modal plumbing ---------------------------------------------------------
+    // Every app modal goes through here so the mobile rules hold in one place:
+    // the card is capped to the viewport (never wider than the screen, never
+    // taller than the safe area), the body inside it wraps rather than pushing
+    // the card sideways, and the page behind stops scrolling. The scroll lock
+    // also detaches the kit's window pull-to-refresh: it listens on `window`
+    // and only stands down when the page is scrolled, so with a modal open at
+    // the top of the page a downward drag on the backdrop — or inside the card —
+    // rubber-banded the list behind instead of scrolling the modal.
+    let ptrHandle = null;
+    let scrollLocks = 0, lockedScrollY = 0;
+
+    function lockPage() {
+      if (scrollLocks++) return;
+      lockedScrollY = window.scrollY || window.pageYOffset || 0;
+      if (ptrHandle) { ptrHandle.detach(); ptrHandle = null; }
+      document.body.style.top = -lockedScrollY + 'px';
+      document.documentElement.classList.add('modal-open');
+    }
+
+    function unlockPage() {
+      if (!scrollLocks || --scrollLocks) return;
+      document.documentElement.classList.remove('modal-open');
+      document.body.style.top = '';
+      window.scrollTo(0, lockedScrollY);
+      attachPtr();
+    }
+
+    function presentAppModal(el, { wide, onDismiss } = {}) {
+      el.classList.add('modal-card');
+      lockPage();
+      const m = unNative.presentModal({
+        contentEl: el,
+        onDismiss: () => { unlockPage(); if (onDismiss) onDismiss(); },
+      });
+      // Set on the card itself so the width cap survives the kit's own rule.
+      if (m.el) m.el.classList.add(wide ? 'modal-wide' : 'modal-narrow');
+      return m;
+    }
+
     // Markdown import/export presents in the kit's centered modal (backdrop
-    // tap and Escape dismiss; tall content scrolls inside the card).
+    // tap and Escape dismiss). The card's height is budgeted so the textarea is
+    // the only thing that scrolls — no second scrollbar on the card, and no
+    // page scroll behind it.
     let mdModal = null;
     function openMd({ title, hint, text, readonly, actionsHtml }) {
       if (!window.unNative) { toast('Import/export needs the UI kit, which failed to load'); return; }
       if (mdModal) mdModal.dismiss();
       const el = document.createElement('div');
-      el.className = 'p-5 flex flex-col gap-3 w-[min(32rem,92vw)] max-h-[80vh]';
+      el.className = 'md-body flex flex-col gap-3';
       el.innerHTML = `
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between gap-2">
           <h2 class="font-semibold text-lg">${esc(title)}</h2>
-          <button onclick="closeMd()" class="x-close text-xl leading-none px-1">&times;</button>
+          <button onclick="closeMd()" class="x-close text-xl leading-none px-1 shrink-0">&times;</button>
         </div>
         <p class="text-xs" style="color: var(--label2)">${esc(hint)}</p>
-        <textarea id="md-text" rows="14" spellcheck="false"
-                  class="w-full flex-1 rounded-lg p-3 text-xs font-mono focus:outline-none resize-none"
+        <textarea id="md-text" rows="12" spellcheck="false" wrap="soft"
+                  class="w-full rounded-lg p-3 text-xs font-mono focus:outline-none resize-none"
                   style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)"></textarea>
-        <div class="flex justify-end gap-2">${actionsHtml}</div>
+        <div class="flex flex-wrap justify-end gap-2">${actionsHtml}</div>
       `;
       const ta = el.querySelector('#md-text');
       ta.value = text;
       ta.readOnly = !!readonly;
       ta.placeholder = readonly ? '' : '# **My List**\n\n* Category\n  * item\n  * ~~done item~~';
-      mdModal = unNative.presentModal({
-        contentEl: el,
-        onDismiss: () => { mdModal = null; },
+      // Identity-checked so the outgoing modal's late onDismiss (it fires after
+      // the fade) can't null out the handle of the one that replaced it.
+      const handle = presentAppModal(el, {
+        wide: true,
+        onDismiss: () => { if (mdModal === handle) mdModal = null; },
       });
+      mdModal = handle;
       if (!readonly) setTimeout(() => ta.focus(), 0);
     }
     function closeMd() {
@@ -1841,13 +1974,13 @@
 
     // mode 'new' (from Home: create a list) or 'merge' (into the current list,
     // which offers both add and replace).
-    function openImport(mode) {
+    function openImport(mode, text) {
       openMd({
         title: 'Import markdown',
         hint: mode === 'new'
           ? 'Paste markdown to create a new list. ~~Strikethrough~~ items import as completed.'
           : 'Paste markdown to import into this list. Add merges into matching categories; Replace clears the list first. ~~Strikethrough~~ items import as completed.',
-        text: '',
+        text: text || '',
         readonly: false,
         actionsHtml: mode === 'new' ? `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
@@ -1899,18 +2032,14 @@
       if (!window.unNative) { toast('Members needs the UI kit, which failed to load'); return; }
       if (membersModal) { renderMembers(); return; }
       const el = document.createElement('div');
-      el.className = 'p-5 w-[min(24rem,90vw)]';
       el.innerHTML = `
-        <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center justify-between gap-2 mb-4">
           <h2 class="font-semibold text-lg">Members</h2>
-          <button onclick="closeMembers()" class="x-close text-xl leading-none px-1">&times;</button>
+          <button onclick="closeMembers()" class="x-close text-xl leading-none px-1 shrink-0">&times;</button>
         </div>
         <div id="members-body"></div>
       `;
-      membersModal = unNative.presentModal({
-        contentEl: el,
-        onDismiss: () => { membersModal = null; },
-      });
+      membersModal = presentAppModal(el, { onDismiss: () => { membersModal = null; } });
       renderMembers();
     }
     function closeMembers() {
@@ -1923,23 +2052,23 @@
       if (!body) return;
       body.innerHTML = `
         <div class="space-y-1.5 mb-4">
-          <div class="flex items-center justify-between px-2 py-1.5 rounded-lg" style="background: var(--fill)">
+          <div class="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg" style="background: var(--fill)">
             <span class="text-sm">@${esc(current.list.owner_username)}</span>
-            <span class="text-[11px] uppercase tracking-wide tinted">Owner</span>
+            <span class="text-[11px] uppercase tracking-wide tinted shrink-0">Owner</span>
           </div>
           ${current.members.map(m => `
-            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-[var(--fill)]">
+            <div class="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--fill)]">
               <span class="text-sm">@${esc(m.username)}</span>
-              ${isOwner ? `<button onclick="removeMember(${m.id})" class="x-close hover:!text-red-500 text-xs">Remove</button>` : ''}
+              ${isOwner && !m.shot ? `<button onclick="removeMember(${m.id})" class="x-close hover:!text-red-500 text-xs shrink-0">Remove</button>` : ''}
             </div>`).join('')}
           ${!current.members.length ? '<p class="text-xs px-2 py-1 flex items-center gap-1.5" style="color: var(--label3)">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
         </div>
         ${isOwner ? `
           <form onsubmit="return inviteMember(event)" class="flex gap-2">
-            <input name="username" placeholder="Invite by username…" autocomplete="off"
-                   class="flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none"
+            <input name="username" placeholder="Invite by username…" autocomplete="off" size="1"
+                   class="flex-1 min-w-0 rounded-lg px-3 py-2 text-sm focus:outline-none"
                    style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
-            <button class="text-sm px-3 py-2 rounded-lg btn-primary">Invite</button>
+            <button class="text-sm px-3 py-2 rounded-lg btn-primary shrink-0">Invite</button>
           </form>
           <p class="text-[11px] mt-2" style="color: var(--label3)">Invites take effect immediately — the user will see this list next time they open the app.</p>`
         : '<p class="text-xs" style="color: var(--label3)">Only the owner can manage members.</p>'}
@@ -1998,16 +2127,19 @@
       });
     }
 
-    // Pull-to-refresh on the window scroller — attached once; the kit rubber-
-    // bands #app, holds its spinner until the refresh promise settles, and
-    // no-ops on desktop.
-    if (window.unNative) {
-      unNative.attachPullToRefresh(
+    // Pull-to-refresh on the window scroller — the kit rubber-bands #app, holds
+    // its spinner until the refresh promise settles, and no-ops on desktop.
+    // Detached while a modal is open (see lockPage) and re-attached on dismiss,
+    // so a drag inside a modal never pulls the page behind it.
+    function attachPtr() {
+      if (!window.unNative || ptrHandle) return;
+      ptrHandle = unNative.attachPullToRefresh(
         window,
         () => (current ? refreshList() : refreshHome()),
         { content: document.getElementById('app') }
       );
     }
+    attachPtr();
   </script>
 </body>
 </html>

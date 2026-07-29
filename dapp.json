@@ -36,6 +36,18 @@
       "expectSelector": "#search-clear.un-touch-target:not(.hidden)"
     },
     {
+      "name": "Import modal is capped to the card, not the viewport",
+      "path": "/?shot=import",
+      "expectSelector": ".un-modal.modal-wide .modal-card.md-body #md-text",
+      "expectText": "Import markdown"
+    },
+    {
+      "name": "Members modal is capped to the card, not the viewport",
+      "path": "/?shot=members",
+      "expectSelector": ".un-modal.modal-narrow .modal-card #members-body",
+      "expectText": "Members"
+    },
+    {
       "name": "Offline status strip renders",
       "path": "/?shot=offline",
       "expectSelector": "#offline-chip",
