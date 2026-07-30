@@ -604,6 +604,27 @@ async function ensureDefaultCategory(listId) {
   return created[0];
 }
 
+// Idempotency key for item creates. The client sends one per queued `add` op,
+// so a create it had to retry (a timeout that actually landed, a replay after a
+// reload) returns the row it already made instead of a duplicate. Anything that
+// isn't a short, safe token is ignored rather than rejected — an old client
+// sending nothing must keep working.
+const CLIENT_OP_ID_RE = /^[A-Za-z0-9_:.-]{1,64}$/;
+function clientOpId(body) {
+  const v = body && body.client_op_id;
+  return typeof v === 'string' && CLIENT_OP_ID_RE.test(v) ? v : null;
+}
+
+// Looks up a previous create by its idempotency key and re-checks access, so a
+// retry can only ever return a row the caller is still allowed to see.
+async function itemByClientOpId(opId, user) {
+  if (!opId) return null;
+  const { rows } = await pool.query(`SELECT id FROM items WHERE client_op_id = $1`, [opId]);
+  if (!rows.length) return null;
+  const { item, category, role } = await getItemAccess(rows[0].id, user);
+  return item && role ? { item, category } : null;
+}
+
 // Quick-add: create an item directly on a list; it lands in the default
 // (uncategorized) bucket. Returns the category too, in case it was created
 // just now and the client doesn't know it yet.
@@ -613,14 +634,19 @@ app.post('/api/lists/:id/items', async (req, res) => {
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
     const text = (req.body.text || '').trim();
     if (!text) return res.status(400).json({ error: 'Item text is required' });
+    const opId = clientOpId(req.body);
+    // Already created by an earlier attempt of this same op: hand back that row
+    // (no second insert, no second notify — nothing changed).
+    const prior = await itemByClientOpId(opId, req.user);
+    if (prior) return res.json(prior);
     const category = await ensureDefaultCategory(list.id);
     const { rows } = await pool.query(
-      `INSERT INTO items (category_id, text, checked, sort_order, created_by)
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
        VALUES ($1, $2, FALSE,
                COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
-               $3)
+               $3, $4)
        RETURNING *`,
-      [category.id, text, req.user.username]
+      [category.id, text, req.user.username, opId]
     );
     notify(list.id, req);
     res.json({ item: rows[0], category });
@@ -635,13 +661,16 @@ app.post('/api/categories/:id/items', async (req, res) => {
     if (!category || !role) return res.status(404).json({ error: 'Category not found' });
     const text = (req.body.text || '').trim();
     if (!text) return res.status(400).json({ error: 'Item text is required' });
+    const opId = clientOpId(req.body);
+    const prior = await itemByClientOpId(opId, req.user);
+    if (prior) return res.json({ item: prior.item });
     const { rows } = await pool.query(
-      `INSERT INTO items (category_id, text, checked, sort_order, created_by)
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
        VALUES ($1, $2, FALSE,
                COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
-               $3)
+               $3, $4)
        RETURNING *`,
-      [category.id, text, req.user.username]
+      [category.id, text, req.user.username, opId]
     );
     notify(category.list_id, req);
     res.json({ item: rows[0] });
@@ -865,8 +894,15 @@ async function start() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     ALTER TABLE items ADD COLUMN IF NOT EXISTS last_checked_by VARCHAR(255);
+    -- Client-supplied idempotency key for creates, so a retried add (a timeout
+    -- that actually landed, a queued op replayed after a reload) can't insert
+    -- the same item twice. Nullable: rows created before this column, seeded
+    -- rows, and imports all keep NULL, which the partial index ignores.
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS client_op_id VARCHAR(64);
     COMMENT ON TABLE items IS 'staging:private';
     CREATE INDEX IF NOT EXISTS items_category_idx ON items (category_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS items_client_op_id_key
+      ON items (client_op_id) WHERE client_op_id IS NOT NULL;
 
     -- The default category is now the invisible "uncategorized" bucket.
     -- A renamed default was evidently being used as a real category, so it
