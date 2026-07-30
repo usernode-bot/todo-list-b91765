@@ -58,6 +58,22 @@
       "path": "/?shot=syncing",
       "expectSelector": "#offline-chip",
       "expectText": "Syncing 2 changes"
+    },
+    {
+      "name": "First load renders skeleton placeholders, not a spinner",
+      "path": "/?shot=loading",
+      "expectSelector": "#app .sk"
+    },
+    {
+      "name": "A row waiting to sync shows its pending marker",
+      "path": "/?shot=pending",
+      "expectSelector": ".item-row [data-pending-dot]"
+    },
+    {
+      "name": "Slow-connection status strip renders",
+      "path": "/?shot=slow",
+      "expectSelector": "#offline-chip",
+      "expectText": "Slow connection"
     }
   ],
   "visibility": {

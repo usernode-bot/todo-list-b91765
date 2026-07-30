@@ -124,6 +124,27 @@
     /* Make room so the strip never covers the first row of content. */
     body.has-strip #app { padding-top: 2.15rem; }
 
+    /* First-load placeholders. Only ever drawn when there is no saved copy of
+       the screen to paint, so content lands into the same shape instead of
+       replacing a "Loading…" line. */
+    .sk {
+      display: block; border-radius: 6px; background: var(--fill2);
+      animation: sk-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes sk-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
+    @media (prefers-reduced-motion: reduce) { .sk { animation: none } }
+    /* The skeleton is aria-hidden, so the announcement the old text stub made
+       is carried by a visually hidden live region instead. Own class rather
+       than Tailwind's .sr-only: the CDN may not be warm on a cold load. */
+    .vis-hidden {
+      position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+
+    /* Per-row "waiting to sync" marker. Deliberately quiet, and deliberately
+       NOT on the checkbox — a dimmed checkbox reads as broken. */
+    .pending-dot { color: var(--label3); opacity: .8; }
+
     /* Actions that need a live connection: dimmed while offline. The handlers
        stay wired and explain themselves with a toast when tapped. */
     body.is-offline .needs-net { opacity: .45; }
@@ -239,6 +260,24 @@
     // these the mobile layout of either modal is uncapturable. Pure UI state:
     // they open a modal on an existing list and write nothing.
     const shotModal = (shot === 'import' || shot === 'members') ? shot : '';
+    // Screenshot/test deep links for the two states this change introduces:
+    // the first-load skeleton (?shot=loading) and a row waiting to sync
+    // (?shot=pending). Both only exist for a moment on a slow connection, so
+    // neither is reachable by navigation. Display-only, in every environment.
+    const shotLoading = shot === 'loading';
+    const shotPending = shot === 'pending';
+
+    // Deadlines. Every request gets one: without them a stalled TCP connection
+    // hangs the promise for as long as the browser's own timeout (often
+    // minutes), which is the whole of issue #40 — the UI waits on a request
+    // that will never answer.
+    const LOAD_TIMEOUT_MS = 12000;      // reads: a screen we're waiting to paint
+    const MUTATION_TIMEOUT_MS = 8000;   // queued writes: retried, so fail fast
+    const IMPORT_TIMEOUT_MS = 20000;    // whole-list replace: legitimately slow
+    const HEALTH_TIMEOUT_MS = 3000;     // reachability probe: answer or it's a no
+    const PENDING_HINT_MS = 800;        // before a row admits it hasn't synced
+    const BUSY_HINT_MS = 600;           // before a control admits it is waiting
+
     // Random per-tab id sent with every mutation; SSE events echo it back so
     // the tab that made a change can skip refetching its own edit.
     const clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -257,20 +296,42 @@
     // lists nor replay its pending changes with the wrong token.
     const NS = 'todo:u' + (jwt && jwt.id != null ? String(jwt.id) : 'anon') + ':';
 
+    // Every request is abortable and every request has a deadline. `timeoutMs`
+    // is per-call because the right deadline differs by kind of work: a read we
+    // are painting can wait longer than a write we are going to retry anyway.
     async function api(path, opts = {}) {
+      const { timeoutMs = 10000, ...init } = opts;
+      const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      let timedOut = false;
+      const timer = ctl
+        ? setTimeout(() => { timedOut = true; ctl.abort(); }, timeoutMs)
+        : null;
       let res;
       try {
         res = await fetch(path, {
-          ...opts,
+          ...init,
+          ...(ctl ? { signal: ctl.signal } : {}),
           headers: { 'Content-Type': 'application/json', ...headers, ...(opts.headers || {}) },
         });
       } catch (_) {
+        if (timedOut) {
+          // The connection is up but not answering. Tagged as a network error
+          // so queued writes still retry, and as a timeout so callers can say
+          // "we don't know" instead of "that failed".
+          markSlow();
+          const err = new Error("The connection is slow — we'll keep trying.");
+          err.network = true;
+          err.timeout = true;
+          throw err;
+        }
         // fetch itself rejected — no connection. Tag the error so callers can
         // tell "offline" apart from a server-side rejection.
         markOffline();
         const err = new Error("You're offline");
         err.network = true;
         throw err;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -282,7 +343,7 @@
       }
       // A successful call proves we're back — but never fight the replay loop
       // for the strip while it is mid-drain.
-      if (connState === 'offline' && !replaying && !queueLength()) markOnline();
+      if ((connState === 'offline' || connState === 'slow') && !replaying && !queueLength()) markOnline();
       return data;
     }
 
@@ -374,19 +435,70 @@
     // revert their optimistic update rather than pretend it is queued.
     function saveQueue(q) {
       const ok = cacheSetOrEvict(QUEUE_KEY, q);
+      pendingIds = null;
+      syncHints(queueLength() > 0);
       renderStrip();
       return ok;
     }
     function queueLength() { return loadQueue().length; }
 
-    // 'online' | 'offline' | 'syncing' | 'blocked' ('blocked' = the server
-    // refused our token, so the queue waits for a fresh one).
+    // Which items have unsent changes. Derived from the queue (the queue is the
+    // truth), memoised because every row render asks.
+    let pendingIds = null;
+    function pendingItemIds() {
+      if (shotPendingIds) return shotPendingIds;
+      if (!pendingIds) pendingIds = new Set(loadQueue().map(o => o.itemId));
+      return pendingIds;
+    }
+
+    // Nothing flashes for a change that lands quickly: a row only admits it is
+    // waiting, and the strip only says "Saving…", once an op has been unsent
+    // for a beat. On a fast connection neither timer ever fires.
+    let pendingShown = false, savingShown = false;
+    let pendingHintTimer = null, savingHintTimer = null;
+    function syncHints(queued) {
+      if (queued) {
+        if (!savingShown && !savingHintTimer) {
+          savingHintTimer = setTimeout(() => {
+            savingHintTimer = null; savingShown = true;
+            // A drain still going at this point is one the user can see, so it
+            // also earns the "All changes synced" confirmation when it lands.
+            if (replaying) drainVisible = true;
+            renderStrip();
+          }, BUSY_HINT_MS);
+        }
+        if (!pendingShown && !pendingHintTimer) {
+          pendingHintTimer = setTimeout(() => {
+            pendingHintTimer = null; pendingShown = true;
+            if (current) repaintAllCategories();
+          }, PENDING_HINT_MS);
+        }
+        return;
+      }
+      clearTimeout(savingHintTimer); savingHintTimer = null; savingShown = false;
+      clearTimeout(pendingHintTimer); pendingHintTimer = null;
+      if (pendingShown) {
+        pendingShown = false;
+        if (current) repaintAllCategories();
+      }
+    }
+
+    // 'online' | 'slow' | 'offline' | 'syncing' | 'blocked'. 'slow' is a live
+    // connection that isn't answering in time: writes are safe (they're
+    // queued), so it is a note, not an error. 'blocked' = the server refused
+    // our token, so the queue waits for a fresh one.
     let connState = navigator.onLine === false ? 'offline' : 'online';
     const isOnline = () => connState !== 'offline';
     function markOffline() {
       if (connState !== 'offline') connState = 'offline';
       renderStrip();
       scheduleReplay();
+    }
+    // A timed-out request. Never downgrades 'offline' or 'blocked' — those are
+    // more specific, and both already keep the queue retrying.
+    function markSlow() {
+      if (connState !== 'offline' && connState !== 'blocked') connState = 'slow';
+      renderStrip();
     }
     function markOnline() { connState = 'online'; renderStrip(); }
 
@@ -406,14 +518,33 @@
     function stripState() {
       if (shot === 'offline') return { text: 'Offline — showing saved copy' };
       if (shot === 'syncing') return { text: 'Syncing 2 changes…' };
+      if (shot === 'slow') return { text: 'Slow connection — 2 changes will sync', tap: true };
       if (stripFlash) return { text: stripFlash, ok: true };
       const n = queueLength();
       if (connState === 'blocked') return { text: "Couldn't sync — tap to retry", tap: true };
       if (connState === 'offline') {
         return { text: n ? 'Offline — ' + plural(n) + ' will sync' : 'Offline — showing saved copy' };
       }
-      if (connState === 'syncing') return { text: 'Syncing ' + plural(Math.max(n, 1)) + '…' };
-      if (n) return { text: plural(n) + ' waiting to sync', tap: true };
+      if (connState === 'slow') {
+        return n
+          ? { text: 'Slow connection — ' + plural(n) + ' will sync', tap: true }
+          : { text: 'Slow connection…' };
+      }
+      // A drain in progress. Silent unless it is a real catch-up or it has
+      // already taken longer than a beat — otherwise every single tap would
+      // flash the strip for 200ms on a healthy connection.
+      if (connState === 'syncing') {
+        if (!drainVisible && !savingShown) return null;
+        if (!drainVisible && n <= 1) return { text: 'Saving…' };
+        return { text: 'Syncing ' + plural(Math.max(n, 1)) + '…' };
+      }
+      // Queued but not currently sending (between retries, or just committed).
+      if (n) {
+        if (!savingShown) return null;
+        return n === 1
+          ? { text: 'Saving…' }
+          : { text: plural(n) + ' waiting to sync', tap: true };
+      }
       return null;
     }
 
@@ -440,35 +571,84 @@
 
     function onStripTap() {
       const st = stripState();
-      if (st && st.tap) attemptReplay(true);
+      if (st && st.tap) drain(true);
     }
 
-    // Offline-created items get negative ids until replay maps them; seeding
+    // Locally-created items get negative ids until a reply maps them; seeding
     // from the clock avoids collisions with ids left in a persisted queue.
     let tempSeq = -(Date.now() % 1e9) - 1;
     const isTempId = id => id < 0;
 
+    // Per-op idempotency key, sent with creates so a retried add can't insert
+    // twice (see items.client_op_id server-side). The tab id is random per
+    // load, so keys stay unique across reloads as well as within one.
+    let opSeq = 0;
+    const newOpId = () => clientId + '-' + (++opSeq);
+
     const STORAGE_FULL = "Not enough storage to save this change offline.";
-    function enqueue(op) {
-      const q = loadQueue();
-      q.push(op);
-      if (!saveQueue(q)) { const e = new Error(STORAGE_FULL); e.storage = true; throw e; }
+
+    // Records an item mutation. The caller has ALREADY applied it on screen —
+    // this only persists the intent and kicks the sender, so the network is
+    // never in the interaction path whatever the connection is doing. Returns
+    // false when the intent could not be persisted, which is the caller's
+    // signal to put the row back.
+    function commit(op) {
+      op.opId = op.opId || newOpId();
+      op.attempts = 0;
+      if (!saveQueue(coalesce(loadQueue(), op))) { toast(STORAGE_FULL); return false; }
+      drain();
+      return true;
     }
 
-    // Runs a queueable mutation. Ops already waiting must stay ordered ahead
-    // of new ones, so a non-empty queue short-circuits straight to enqueue.
-    // Returns the API payload, or null when the op was queued for later.
-    async function mutate(op) {
-      if (queueLength()) { enqueue(op); attemptReplay(); return null; }
-      try {
-        return await api(op.path, {
-          method: op.method,
-          ...(op.body == null ? {} : { body: JSON.stringify(op.body) }),
-        });
-      } catch (e) {
-        if (e.network) { enqueue(op); return null; }
-        throw e;
+    // Collapses redundant ops, so holding a checkbox or renaming twice sends
+    // one request rather than a burst. The op at index 0 is left alone while it
+    // is in flight: rewriting the body a request is already carrying would
+    // silently drop the newer value.
+    function coalesce(q, op) {
+      const first = replaying ? 1 : 0;
+      if (op.type === 'toggle' || op.type === 'edit') {
+        // Last write wins per item — but keep the ORIGINAL op's undo payload,
+        // which is the state before the whole burst started.
+        for (let i = q.length - 1; i >= first; i--) {
+          if (q[i].type === op.type && q[i].itemId === op.itemId) {
+            q[i] = { ...op, opId: q[i].opId, undo: q[i].undo || op.undo };
+            return q;
+          }
+        }
+      } else if (op.type === 'delete') {
+        // A delete supersedes every unsent change to that item. If its create
+        // is still queued the item never reached the server at all, so both
+        // ops simply disappear.
+        let cancelsAdd = false;
+        for (let i = q.length - 1; i >= first; i--) {
+          if (q[i].itemId !== op.itemId) continue;
+          if (q[i].type === 'add') cancelsAdd = true;
+          q.splice(i, 1);
+        }
+        if (cancelsAdd) return q;
       }
+      q.push(op);
+      return q;
+    }
+
+    // Rolls a permanently rejected op back off the screen and out of the cache,
+    // so the view is right even when there's no connection to refetch with.
+    function applyUndo(op) {
+      if (!op || !current) return;
+      const u = op.undo;
+      if (op.type === 'add') {
+        current.items = current.items.filter(i => i.id !== op.itemId);
+      } else if (op.type === 'delete') {
+        if (!u || current.items.some(i => i.id === op.itemId)) return;
+        current.items.push({ ...u, id: op.itemId });
+      } else {
+        if (!u) return;
+        const idx = current.items.findIndex(i => i.id === op.itemId);
+        if (idx === -1) return;
+        current.items[idx] = { ...current.items[idx], ...u };
+      }
+      cacheList();
+      repaintAllCategories();
     }
 
     // --- replay ----------------------------------------------------------------
@@ -480,40 +660,85 @@
 
     function scheduleReplay(delay) {
       clearTimeout(replayTimer);
-      replayTimer = setTimeout(() => { replayTimer = null; attemptReplay(); }, delay || REPLAY_IDLE_MS);
+      replayTimer = setTimeout(() => { replayTimer = null; drain(); }, delay || REPLAY_IDLE_MS);
     }
     function stopReplayTimer() { clearTimeout(replayTimer); replayTimer = null; }
 
     // `navigator.onLine` only reports the interface, so confirm with the public
-    // /health endpoint before claiming we're back.
+    // /health endpoint before claiming we're back. On its own deadline: a probe
+    // that hasn't answered in 3s has answered.
     async function reachable() {
+      const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), HEALTH_TIMEOUT_MS) : null;
       try {
-        const res = await fetch('/health', { cache: 'no-store' });
+        const res = await fetch('/health', { cache: 'no-store', ...(ctl ? { signal: ctl.signal } : {}) });
         return res.ok;
-      } catch (_) { return false; }
+      } catch (_) {
+        return false;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
 
     // Sends one op. Consumes the queue head on success (the `add` branch also
     // rewrites later ops that reference its temp id, persisted so the mapping
-    // survives a reload).
+    // survives a reload, and adopts the real id into the row on screen).
     async function runOp(op) {
       if (op.type === 'add') {
-        const data = await api(op.path, { method: 'POST', body: JSON.stringify(op.body) });
+        const data = await api(op.path, {
+          method: 'POST',
+          body: JSON.stringify({ ...op.body, client_op_id: op.opId }),
+          timeoutMs: MUTATION_TIMEOUT_MS,
+        });
         saveQueue(loadQueue().slice(1).map(o =>
           o.itemId === op.itemId ? { ...o, itemId: data.item.id } : o));
+        adoptServerItem(op.itemId, data);
         return;
       }
       if (op.type === 'toggle' || op.type === 'edit') {
         if (!isTempId(op.itemId)) {
-          await api('/api/items/' + op.itemId, { method: 'PATCH', body: JSON.stringify(op.body) });
+          await api('/api/items/' + op.itemId, {
+            method: 'PATCH', body: JSON.stringify(op.body), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
         }
       } else if (op.type === 'delete') {
         if (!isTempId(op.itemId)) {
-          await api('/api/items/' + op.itemId, { method: 'DELETE' });
+          await api('/api/items/' + op.itemId, { method: 'DELETE', timeoutMs: MUTATION_TIMEOUT_MS });
         }
       }
       saveQueue(loadQueue().slice(1));
     }
+
+    // The row was created locally with a temp id; take the server's id (and its
+    // canonical fields) in place. Repaint ONLY when something visible changed —
+    // a bare id swap must not make rows jump under the user's finger, and the
+    // per-category adder input would lose focus mid-typing.
+    function adoptServerItem(tempId, data) {
+      if (!current || !data || !data.item) return;
+      if (data.category && !current.categories.some(c => c.id === data.category.id)) {
+        current.categories.unshift(data.category);
+      }
+      const idx = current.items.findIndex(i => i.id === tempId);
+      if (idx === -1) { cacheList(); return; }
+      const local = current.items[idx], item = data.item;
+      const visiblyChanged = local.text !== item.text
+        || !!local.checked !== !!item.checked
+        || local.category_id !== item.category_id;
+      current.items[idx] = { ...local, ...item };
+      cacheList();
+      if (visiblyChanged) { repaintAllCategories(); return; }
+      // Row handlers all resolve their id from data-item at tap time, so
+      // re-pointing the attribute is the whole of the swap.
+      const row = document.querySelector('#cats .item-row[data-item="' + tempId + '"]');
+      if (row) row.dataset.item = String(item.id);
+      else repaintAllCategories();
+    }
+
+    // Fire-and-forget sender. Never rejects: a failure here is a connection
+    // state, not an exception for the caller to handle.
+    function drain(force) { attemptReplay(force).catch(() => {}); }
+
+    let drainVisible = false;
 
     async function attemptReplay(force) {
       if (replaying) return;
@@ -530,9 +755,16 @@
         return;
       }
       if (!force && navigator.onLine === false) { markOffline(); return; }
-      if (!(await reachable())) { markOffline(); return; }
+      // Fast lane: only probe /health when we believe we are offline. Probing
+      // before every change would put a whole extra round trip in front of
+      // every tap, which is exactly the latency this change removes.
+      if ((connState === 'offline' || force) && !(await reachable())) { markOffline(); return; }
 
       replaying = true;
+      // A catch-up drain (recovering from a bad connection) announces itself
+      // immediately; an ordinary one stays silent unless it turns out slow.
+      const wasDegraded = connState === 'offline' || connState === 'slow' || connState === 'blocked';
+      drainVisible = wasDegraded;
       connState = 'syncing';
       renderStrip();
       let dropped = 0, drained = false;
@@ -544,6 +776,10 @@
           try {
             await runOp(op);
           } catch (e) {
+            // Timed out: the connection is alive but crawling. Hold the op (it
+            // may even have landed — client_op_id makes the retry safe) and
+            // back off instead of declaring the app offline.
+            if (e.timeout) { markSlow(); scheduleReplay(BACKOFF_START); return; }
             if (e.network) { markOffline(); scheduleReplay(); return; }
             const status = e.status || 0;
             if (status === 401) {
@@ -570,19 +806,24 @@
               // block every later change forever.
               dropped++;
               saveQueue(loadQueue().slice(1));
+              applyUndo(op);
               continue;
             }
             // 400 / 403 / 404 / 409 and friends: permanent (the item or list
-            // was deleted elsewhere, or the edit is no longer valid).
+            // was deleted elsewhere, or the edit is no longer valid). Roll the
+            // change back on screen — it is never coming back from the server.
             dropped++;
             saveQueue(loadQueue().slice(1));
+            applyUndo(op);
             continue;
           }
         }
         backoffMs = BACKOFF_START;
         stopReplayTimer();
         markOnline();
-        if (!dropped) flashSynced();
+        // Only confirm a drain the user could see waiting; a change that landed
+        // in 200ms doesn't need a banner telling them so.
+        if (!dropped && drainVisible) flashSynced();
         if (current) refreshList(); else refreshHome();
       } finally {
         replaying = false;
@@ -594,10 +835,14 @@
       }
     }
 
-    window.addEventListener('online', () => attemptReplay(true));
+    window.addEventListener('online', () => drain(true));
     window.addEventListener('offline', markOffline);
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && queueLength()) attemptReplay();
+      if (document.hidden) return;
+      if (queueLength()) drain();
+      // A remote change that arrived while the tab was hidden was deferred
+      // rather than refetched; catch up now that there is something to see.
+      if (liveRefreshPending) liveRefresh();
     });
 
     // Actions with no offline path say so BEFORE they are attempted.
@@ -608,12 +853,55 @@
     }
 
     // Local stand-in for the server's insert (top of the unchecked section).
-    function offlineNewItem(id, categoryId, text) {
-      const min = current.items
+    // Used for EVERY add, not just offline ones: the row is drawn from this and
+    // then adopts the server's id when the reply lands.
+    function localNewItem(id, categoryId, text, items) {
+      const min = (items || current.items)
         .filter(i => i.category_id === categoryId && !i.checked)
         .reduce((m, i) => Math.min(m, i.sort_order), 1);
       return { id, category_id: categoryId, text, checked: false, sort_order: min - 1,
                completed_at: null, created_by: me, last_checked_by: null };
+    }
+
+    // Where the server would move a row inside its section after a toggle
+    // (bottom of the section it lands in), so the optimistic position matches
+    // what the next refetch will say.
+    function sectionBottom(items, categoryId, checked, exceptId) {
+      return items
+        .filter(i => i.category_id === categoryId && !!i.checked === checked && i.id !== exceptId)
+        .reduce((m, i) => Math.max(m, i.sort_order), 0) + 1;
+    }
+
+    // Re-projects still-unsent changes onto a freshly fetched payload. Without
+    // this, any refetch (background reconcile, pull-to-refresh, a live update
+    // from another member) would visibly undo an edit that is still queued.
+    function applyPendingOps(d) {
+      const q = loadQueue();
+      if (!q.length || !d || !Array.isArray(d.items)) return d;
+      for (const op of q) {
+        const idx = d.items.findIndex(i => i.id === op.itemId);
+        if (op.type === 'add') {
+          if (idx !== -1) continue; // already landed server-side
+          const m = /^\/api\/categories\/(\d+)\/items$/.exec(op.path);
+          const bucket = d.categories.find(c => c.is_default) || d.categories[0];
+          const catId = m ? +m[1] : (bucket && bucket.id);
+          if (catId == null || !d.categories.some(c => c.id === catId)) continue;
+          d.items.push(localNewItem(op.itemId, catId, op.body.text, d.items));
+        } else if (idx === -1) {
+          continue; // the row is gone server-side; the drain will sort it out
+        } else if (op.type === 'delete') {
+          d.items.splice(idx, 1);
+        } else if (op.type === 'edit') {
+          d.items[idx] = { ...d.items[idx], text: op.body.text };
+        } else if (op.type === 'toggle') {
+          const it = d.items[idx], checked = !!op.body.checked;
+          d.items[idx] = { ...it, checked,
+            completed_at: checked ? (it.completed_at || new Date().toISOString()) : null,
+            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by,
+            sort_order: sectionBottom(d.items, it.category_id, checked, it.id) };
+        }
+      }
+      return d;
     }
 
     // Platform detection from the kit's html classes; fall back to media
@@ -838,7 +1126,7 @@
         }
         // Coalesce bursts (imports, reorders) into a single refetch.
         clearTimeout(liveRefreshTimer);
-        liveRefreshTimer = setTimeout(refreshList, 150);
+        liveRefreshTimer = setTimeout(liveRefresh, 150);
       };
       es.onerror = () => {
         if (es && es.readyState === EventSource.CLOSED) {
@@ -854,6 +1142,17 @@
       clearTimeout(liveRefreshTimer);
       if (es) { es.close(); es = null; }
       esListId = null;
+    }
+
+    // A remote change wants a refetch — but not while the tab is hidden
+    // (nothing to see, and on a slow link it competes with the drain for the
+    // connection) and not mid-drain (which refetches when it finishes). Either
+    // way the intent is remembered rather than dropped.
+    let liveRefreshPending = false;
+    function liveRefresh() {
+      if (document.hidden || replaying) { liveRefreshPending = true; return; }
+      liveRefreshPending = false;
+      refreshList();
     }
 
     // --- routing --------------------------------------------------------------
@@ -874,11 +1173,71 @@
     function route() {
       const m = location.hash.match(/^#\/list\/(\d+)$/);
       if (m) loadList(m[1]);
+      else if (shotLoading) document.getElementById('app').innerHTML = listSkeleton();
+      else if (shotPending) loadShotPending();
       else if (shotSearch) loadShotSearch();
       else if (shotModal) loadShotModal();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
+
+    // Skeleton placeholders. Only ever used when there is NO saved copy of the
+    // screen to paint — the shape of the screen is a better wait than a
+    // centred "Loading…", and it means content lands without a layout jump.
+    // aria-hidden with a live region alongside: a screen reader gets the one
+    // useful word, not a tree of empty boxes.
+    function skBar(w, h) {
+      return '<span class="sk" style="width:' + w + ';height:' + (h || 13) + 'px"></span>';
+    }
+    function skRows(n) {
+      let out = '';
+      for (let i = 0; i < n; i++) {
+        out += '<div class="un-group-row flex items-center gap-3 px-4 py-3">' +
+               skBar('1.05rem', 18) + skBar((52 + ((i * 17) % 34)) + '%') + '</div>';
+      }
+      return out;
+    }
+    const SK_NAV_SPACER = '<div style="height: calc(3rem + env(safe-area-inset-top))"></div>';
+    const SK_LIVE = '<p class="vis-hidden" role="status">Loading…</p>';
+
+    function homeSkeleton() {
+      return '<div aria-hidden="true">' +
+          '<header class="un-navbar un-safe-top"><div class="w-full max-w-2xl mx-auto h-12 flex items-center justify-between gap-2 px-4">' +
+            skBar('3.4rem', 15) + skBar('4.2rem', 15) +
+          '</div></header>' + SK_NAV_SPACER +
+          '<div class="pt-2 pb-4">' + skBar('7.5rem', 30) + '</div>' +
+          '<div class="un-group">' + skRows(4) + '</div>' +
+        '</div>' + SK_LIVE;
+    }
+
+    function listSkeleton() {
+      return '<div aria-hidden="true">' +
+          '<header class="un-navbar un-safe-top"><div class="w-full max-w-2xl mx-auto h-12 flex items-center justify-between gap-2 px-4">' +
+            skBar('2.6rem', 15) + skBar('7rem', 17) + skBar('2.2rem', 15) +
+          '</div></header>' + SK_NAV_SPACER +
+          '<div class="my-3">' + skBar('100%', 40) + '</div>' +
+          '<div class="un-group px-4 py-3 mb-5">' + skBar('45%', 17) + '</div>' +
+          '<div class="px-4 pb-2">' + skBar('5rem', 11) + '</div>' +
+          '<div class="un-group">' + skRows(5) + '</div>' +
+        '</div>' + SK_LIVE;
+    }
+
+    // Screenshot-state deep link — `/?shot=pending` shows a row marked as
+    // waiting to sync, a state that otherwise exists only for the moment a
+    // change is in flight on a slow connection. Display-only: it forces the
+    // marker on one row and writes nothing to the queue or the database.
+    let shotPendingIds = null;
+    async function loadShotPending() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(lists[0].id);
+      if (!current || !current.items.length) return;
+      const target = current.items.find(i => !i.checked) || current.items[0];
+      shotPendingIds = new Set([target.id]);
+      pendingShown = true;
+      repaintAllCategories();
+    }
 
     // Screenshot-state deep link — `/?shot=search` boots straight into a list
     // with a query typed, because the clear-search button only exists mid-
@@ -928,34 +1287,44 @@
     }
 
     // --- Home / My Lists -------------------------------------------------------
+    // Guards against a slow load painting over a newer navigation.
+    let loadSeq = 0;
+
     async function loadHome() {
       current = null;
       disconnectEvents();
       const app = document.getElementById('app');
-      // Transitioned navigations fetch first and render inside the animation;
-      // the "Loading…" stub only shows on a direct/initial load.
       const type = lastScreen === 'list' ? 'pop' : 'none';
-      if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
+      const seq = ++loadSeq;
+      // Cache-first: a screen we already have a saved copy of paints NOW and
+      // reconciles in the background. The connection only ever affects how
+      // fresh the screen is, never how long it takes to appear.
+      const cached = cacheGet(HOME_KEY);
+      if (cached) {
+        renderScreen(() => renderHome(cached), type);
+        lastScreen = 'home';
+      } else if (type === 'none') {
+        app.innerHTML = homeSkeleton();
+      }
       let lists;
       try {
-        ({ lists } = await api('/api/lists'));
+        ({ lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS }));
         lists = await maybeImportLandingList(lists);
         cacheSet(HOME_KEY, lists);
       } catch (e) {
-        // Offline: fall back to the last good copy instead of an error screen.
-        const cached = e.network ? cacheGet(HOME_KEY) : null;
-        if (cached) {
-          if (current) return;
-          renderScreen(() => renderHome(cached), type);
-          lastScreen = 'home';
-          return;
-        }
+        if (seq !== loadSeq || current) return;
+        // The saved copy is already on screen; the status strip explains why it
+        // may be stale, so don't replace it with an error.
+        if (cached) return;
         app.innerHTML = '<p class="text-red-500 text-sm py-8 text-center">' + esc(e.message) + '</p>';
         lastScreen = 'home';
         return;
       }
-      if (current) return; // navigated into a list mid-fetch
-      renderScreen(() => renderHome(lists), type);
+      if (seq !== loadSeq || current) return; // navigated away mid-fetch
+      // Identical to what's already painted: leave the DOM (and the scroll
+      // position) alone.
+      if (cached && JSON.stringify(cached) === JSON.stringify(lists)) return;
+      renderScreen(() => renderHome(lists), cached ? 'none' : type);
       lastScreen = 'home';
     }
 
@@ -1011,7 +1380,7 @@
                     class="tinted text-[15px] py-2 pr-2">${themeLabel()}</button>
             <div class="flex items-center gap-3">
               <button onclick="openImport('new')" class="needs-net tinted text-[15px] py-2 px-1">Import</button>
-              <button onclick="newList()" title="New list" aria-label="New list" class="needs-net tinted text-[26px] font-light leading-none pl-1 py-1">+</button>
+              <button onclick="newList(this)" title="New list" aria-label="New list" class="needs-net tinted text-[26px] font-light leading-none pl-1 py-1">+</button>
             </div>
           </div>
         </header>
@@ -1036,7 +1405,7 @@
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16" style="color: var(--label2)">
              <p class="mb-3">No lists yet.</p>
-             <button onclick="newList()" class="needs-net tinted text-[15px] font-medium">Create your first list</button>
+             <button onclick="newList(this)" class="needs-net tinted text-[15px] font-medium">Create your first list</button>
            </div>`}
       `;
       wireNative();
@@ -1045,7 +1414,7 @@
     // Silent refetch for pull-to-refresh — no "Loading…" wipe.
     async function refreshHome() {
       try {
-        const { lists } = await api('/api/lists');
+        const { lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS });
         cacheSet(HOME_KEY, lists);
         if (current) return; // navigated into a list mid-fetch
         renderHome(lists);
@@ -1054,14 +1423,18 @@
       }
     }
 
-    async function newList() {
+    async function newList(btn) {
       if (!requireOnline()) return;
       const name = await askText('List name:');
       if (!name || !name.trim()) return;
-      try {
-        const { list } = await api('/api/lists', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
-        location.hash = '#/list/' + list.id;
-      } catch (e) { toast(e.message); }
+      await withBusy(btn, async () => {
+        try {
+          const { list } = await api('/api/lists', {
+            method: 'POST', body: JSON.stringify({ name: name.trim() }), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
+          location.hash = '#/list/' + list.id;
+        } catch (e) { reportWriteError(e); }
+      });
     }
 
     // --- List View --------------------------------------------------------------
@@ -1072,33 +1445,49 @@
       pendingSearch = '';
       const app = document.getElementById('app');
       const type = lastScreen === 'home' ? 'push' : 'none';
-      if (type === 'none') app.innerHTML = '<p class="text-sm py-8 text-center" style="color: var(--label2)">Loading…</p>';
-      try {
-        current = await api('/api/lists/' + id);
-        cacheList();
-      } catch (e) {
-        // Offline: render the saved copy; SSE reconnects on its own later.
-        const cached = e.network ? cacheGet(listKey(id)) : null;
-        if (cached) {
-          current = cached;
-          touchList(id);
-        } else {
-          disconnectEvents();
-          // A list never opened while connected has nothing to show — say that
-          // plainly instead of showing a red error.
-          app.innerHTML = e.network
-            ? `<div class="py-10 text-center">
-                 <p class="text-[15px]" style="color: var(--label2)">This list isn't available offline.</p>
-                 <p class="text-[13px] mt-1" style="color: var(--label3)">Open it once while connected and it'll be here next time.</p>
-                 <p class="mt-4"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>
-               </div>`
-            : `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
-               <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
-          lastScreen = 'list';
-          return;
-        }
+      const seq = ++loadSeq;
+      // Cache-first, exactly as Home: paint the saved copy immediately (with
+      // any still-unsent changes projected back on), then reconcile. The live
+      // stream is opened off the first paint rather than the fetch, so remote
+      // changes start arriving while the refetch is still in the air.
+      const cached = cacheGet(listKey(id));
+      let painted = false;
+      if (cached) {
+        current = applyPendingOps(cached);
+        touchList(id);
+        renderScreen(() => renderList(current), type);
+        lastScreen = 'list';
+        connectEvents(current.list.id);
+        painted = true;
+      } else if (type === 'none') {
+        app.innerHTML = listSkeleton();
       }
-      renderScreen(() => renderList(current), type);
+      let data;
+      try {
+        data = await api('/api/lists/' + id, { timeoutMs: LOAD_TIMEOUT_MS });
+      } catch (e) {
+        if (seq !== loadSeq) return;
+        if (painted) return; // saved copy stands; the strip explains the rest
+        disconnectEvents();
+        // A list never opened while connected has nothing to show — say that
+        // plainly instead of showing a red error.
+        app.innerHTML = e.network
+          ? `<div class="py-10 text-center">
+               <p class="text-[15px]" style="color: var(--label2)">This list isn't available offline.</p>
+               <p class="text-[13px] mt-1" style="color: var(--label3)">Open it once while connected and it'll be here next time.</p>
+               <p class="mt-4"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>
+             </div>`
+          : `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
+             <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
+        lastScreen = 'list';
+        return;
+      }
+      if (seq !== loadSeq) return; // navigated away mid-fetch
+      const before = painted ? JSON.stringify(current) : null;
+      current = applyPendingOps(data);
+      cacheList();
+      if (painted && before === JSON.stringify(current)) return; // nothing changed
+      renderScreen(() => renderList(current), painted ? 'none' : type);
       lastScreen = 'list';
       connectEvents(current.list.id);
     }
@@ -1107,11 +1496,18 @@
     // Used for both error recovery and SSE-pushed remote changes, so it
     // preserves any in-progress typing in an add-item / new-category field
     // across the repaint.
+    // Single-flight: a live update, a pull-to-refresh and a finished drain can
+    // all want a refetch at once, and on a slow link three in-flight copies of
+    // the same GET make each other slower. A request that arrives mid-flight is
+    // remembered and run once, after.
+    let refreshInFlight = false, refreshQueued = false;
     async function refreshList() {
       if (!current) return;
+      if (refreshInFlight) { refreshQueued = true; return; }
+      refreshInFlight = true;
       const id = current.list.id;
       try {
-        const data = await api('/api/lists/' + id);
+        const data = applyPendingOps(await api('/api/lists/' + id, { timeoutMs: LOAD_TIMEOUT_MS }));
         if (!current || current.list.id !== id) return; // navigated away mid-fetch
         current = data;
         cacheList();
@@ -1137,7 +1533,12 @@
             try { input.setSelectionRange(focus.pos, focus.pos); } catch (_) {}
           }
         }
-      } catch (e) { if (!e.network) toast(e.message); }
+      } catch (e) {
+        if (!e.network) toast(e.message);
+      } finally {
+        refreshInFlight = false;
+        if (refreshQueued) { refreshQueued = false; setTimeout(refreshList, 0); }
+      }
     }
 
     // Items of one section (unchecked or checked) of a category, in order.
@@ -1176,7 +1577,7 @@
         <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
         <button onclick="closeDrawer(); openImport('merge')" class="needs-net ${c}">Import markdown</button>
         <button onclick="cycleTheme()" data-theme-label class="${c}">Theme: ${themeLabel()}</button>
-        ${isOwner ? `<button onclick="closeDrawer(); deleteList()" class="needs-net ${c}" style="color: var(--danger)">Delete list</button>` : ''}
+        ${isOwner ? `<button onclick="closeDrawer(); deleteList(this)" class="needs-net ${c}" style="color: var(--danger)">Delete list</button>` : ''}
       `;
     }
 
@@ -1188,7 +1589,7 @@
           <div class="w-full max-w-2xl mx-auto h-12 flex items-center justify-between gap-1 px-2 relative">
             <a href="#/" title="Back to My Lists" class="un-navbar-back flex items-center text-[17px] pl-1.5 pr-2 py-1.5 shrink-0">Lists</a>
             <h1 id="list-title" class="un-navbar-title absolute left-1/2 -translate-x-1/2 max-w-[44%] truncate text-center${isOwner ? ' cursor-pointer' : ''}"
-                ${isOwner ? 'onclick="renameList()" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
+                ${isOwner ? 'onclick="renameList(this)" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
             <div class="flex items-center shrink-0">
               ${d.members.length === 0 ? `
               <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
@@ -1332,7 +1733,7 @@
             ${searching ? '' : `
             <button onclick="toggleAdder(${c.id})" title="Add an item"
                     class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
-            <button onclick="deleteCategory(${c.id})" title="Delete category"
+            <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
           <div class="un-group">
@@ -1361,8 +1762,14 @@
     // Tapping anywhere on the row toggles the item; interactive children
     // (checkbox, edit/delete buttons, drag handle) keep their own behavior.
     // The kit's swipe recognizer suppresses the click that trails a swipe.
-    function rowTap(ev, id) {
+    // A row's id is read from the DOM at tap time, never captured at render
+    // time: a queued add adopts its server id in place, so a value baked into
+    // the handler can be one request out of date.
+    const rowId = el => +el.closest('.item-row').dataset.item;
+
+    function rowTap(ev, el) {
       if (ev.target.closest('button, input, .drag-handle')) return;
+      const id = rowId(el);
       const item = current.items.find(i => i.id === id);
       if (item) toggleItem(id, !item.checked);
     }
@@ -1375,18 +1782,24 @@
     }
 
     function renderItem(i) {
+      // The row itself never looks pending — the change IS applied, it just
+      // hasn't reached the server. A quiet marker says so, and only after the
+      // change has been unsent long enough to be worth mentioning.
+      const pending = pendingShown && pendingItemIds().has(i.id);
       return `
         <div class="un-group-row un-pressable item-row group flex items-center gap-2.5 px-4 py-2.5 cursor-pointer"
-             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}"
-             onclick="rowTap(event, ${i.id})">
+             data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}"${pending ? ' data-pending="1"' : ''}
+             onclick="rowTap(event, this)">
           ${searchActive() ? '' : `<span class="drag-handle item-drag select-none text-sm shrink-0" style="color: var(--label3)" title="Drag to reorder">⠿</span>`}
-          <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(${i.id}, this.checked)"
+          <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(rowId(this), this.checked)"
                  class="todo-check">
           <span class="flex-1 text-[16px] break-words ${i.checked ? 'line-through' : ''}"${i.checked ? ' style="color: var(--label2)"' : ''}>${esc(i.text)}</span>
+          ${pending ? `<span class="pending-dot shrink-0 text-[15px] leading-none" data-pending-dot
+                 title="Waiting to sync" aria-label="Waiting to sync">⋯</span>` : ''}
           ${i.last_checked_by ? `<span class="shrink-0 text-[11px]" style="color: var(--label3)" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
-          <button onclick="editItem(${i.id})" title="Edit"
+          <button onclick="editItem(rowId(this))" title="Edit"
                   class="hover-action opacity-0 group-hover:opacity-100 text-xs px-1" style="color: var(--label2)">✎</button>
-          <button onclick="deleteItem(${i.id})" title="Delete"
+          <button onclick="deleteItem(rowId(this))" title="Delete"
                   class="hover-action opacity-0 group-hover:opacity-100 hover:!text-red-500 text-xs px-1" style="color: var(--label2)">✕</button>
         </div>`;
     }
@@ -1430,17 +1843,19 @@
       // Swipe actions FIRST (reorder composes with the .un-swipe wrappers).
       document.querySelectorAll('#cats .item-row:not([data-wired])').forEach(row => {
         row.dataset.wired = '1';
-        const id = +row.dataset.item;
+        // Resolved per tap, not per wire: an add that adopts its server id
+        // rewrites data-item on the surviving row (see adoptServerItem).
+        const id = () => +row.dataset.item;
         const checked = row.dataset.checked === '1';
         unNative.attachSwipeActions(row, {
           actions: [
             { label: checked ? 'Undo' : 'Complete', color: 'var(--un-accent)',
-              handler: () => toggleItem(id, !checked) },
-            { label: 'Rename', handler: () => editItem(id) },
+              handler: () => toggleItem(id(), !checked) },
+            { label: 'Rename', handler: () => editItem(id()) },
             // Destructive last action: full swipe / hard flick commits, the
-            // kit collapses and removes the row, then deleteItem() runs the
-            // API call (and repaints the row back in if the delete failed).
-            { label: 'Delete', destructive: true, handler: () => deleteItem(id) },
+            // kit collapses and removes the row, then deleteItem() records the
+            // change (and repaints the row back in if it couldn't).
+            { label: 'Delete', destructive: true, handler: () => deleteItem(id()) },
           ],
         });
       });
@@ -1514,22 +1929,35 @@
         if (it) it.sort_order = idx + 1;
       });
       (fromCat === toCat ? [toCat] : [fromCat, toCat]).forEach(repaintCategory);
+      // An item whose create hasn't reached the server has no id to reorder by
+      // yet. Keep the local move and let the refetch after the drain settle it,
+      // rather than sending a temp id the server can't match.
+      if (isTempId(id) || ids.some(isTempId)) {
+        toast('Still saving that item — its position will settle in a moment.');
+        return;
+      }
       persistItemOrder(id, fromCat, toCat, ids);
     }
 
     async function persistItemOrder(id, fromCat, toCat, ids) {
       try {
         if (fromCat !== toCat) {
-          await api('/api/items/' + id, { method: 'PATCH', body: JSON.stringify({ category_id: toCat }) });
+          await api('/api/items/' + id, {
+            method: 'PATCH', body: JSON.stringify({ category_id: toCat }), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
         }
-        await api('/api/categories/' + toCat + '/reorder-items', { method: 'POST', body: JSON.stringify({ itemIds: ids }) });
+        await api('/api/categories/' + toCat + '/reorder-items', {
+          method: 'POST', body: JSON.stringify({ itemIds: ids }), timeoutMs: MUTATION_TIMEOUT_MS,
+        });
       } catch (e) { revertOrder(e); }
     }
 
     // A reorder has no offline queue path, so a failed one must not linger on
     // screen: restore the saved copy (offline) or refetch (server error).
     function revertOrder(e) {
-      if (!e.network) { toast(e.message); refreshList(); return; }
+      // A timeout may well have landed, so treat it like a server error and
+      // ask the server what the order actually is — never silently undo it.
+      if (!e.network || e.timeout) { toast(e.message); refreshList(); return; }
       toast("You're offline — reordering needs a connection.");
       const saved = current && cacheGet(listKey(current.list.id));
       if (saved) { current = saved; renderList(current); } else { refreshList(); }
@@ -1541,8 +1969,9 @@
       current.categories.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
       current.categories.forEach((c, idx) => { c.sort_order = idx; });
       repaintAllCategories();
-      api('/api/lists/' + current.list.id + '/reorder-categories', { method: 'POST', body: JSON.stringify({ categoryIds: ids }) })
-        .catch(revertOrder);
+      api('/api/lists/' + current.list.id + '/reorder-categories', {
+        method: 'POST', body: JSON.stringify({ categoryIds: ids }), timeoutMs: MUTATION_TIMEOUT_MS,
+      }).catch(revertOrder);
     }
 
     // --- search handlers -------------------------------------------------------
@@ -1572,42 +2001,111 @@
       if (qa) qa.classList.toggle('hidden', searchActive());
     }
 
+    // --- connection-only actions --------------------------------------------------
+    // Lists, categories, reorders, import and membership have no offline path,
+    // so they DO have to wait for the server. What they must never do is wait
+    // silently: the control that was tapped shows it is working, refuses a
+    // second tap, and the request has a deadline.
+
+    async function withBusy(el, fn) {
+      if (!el || !el.tagName) return fn();
+      if (el.dataset.busy) return; // already in flight — ignore the repeat tap
+      el.dataset.busy = '1';
+      const controls = el.tagName === 'FORM'
+        ? Array.from(el.querySelectorAll('input, button, textarea'))
+        : [el];
+      const labelled = el.tagName === 'FORM' ? null : el;
+      const label = labelled ? labelled.innerHTML : null;
+      controls.forEach(c => { c.disabled = true; });
+      el.setAttribute('aria-busy', 'true');
+      el.style.opacity = '.55';
+      // Only a request that is actually slow gets the "…" — a fast one just
+      // completes, with no flicker.
+      const hint = labelled ? setTimeout(() => { labelled.innerHTML = '…'; }, BUSY_HINT_MS) : null;
+      try {
+        return await fn();
+      } finally {
+        clearTimeout(hint);
+        delete el.dataset.busy;
+        // A repaint may have replaced the element while we waited.
+        if (el.isConnected) {
+          if (label !== null) labelled.innerHTML = label;
+          controls.forEach(c => { if (c.isConnected) c.disabled = false; });
+          el.removeAttribute('aria-busy');
+          el.style.opacity = '';
+        }
+      }
+    }
+
+    // A write with no queue behind it that timed out MAY have landed, so never
+    // claim it failed. Say what is actually known and reconcile from the
+    // server, which is the only thing that can settle it.
+    function reportWriteError(e) {
+      if (e.timeout) {
+        toast("We didn't hear back — your change may not have saved.");
+        if (current) refreshList(); else refreshHome();
+        return true;
+      }
+      toast(e.message);
+      return false;
+    }
+
     // --- list actions ------------------------------------------------------------
-    async function renameList() {
+    async function renameList(btn) {
       if (!requireOnline()) return;
       const name = await askText('Rename list:', current.list.name);
       if (!name || !name.trim() || name.trim() === current.list.name) return;
-      try {
-        await api('/api/lists/' + current.list.id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
-        current.list.name = name.trim();
-        renderList(current);
-      } catch (e) { toast(e.message); }
+      await withBusy(btn, async () => {
+        try {
+          await api('/api/lists/' + current.list.id, {
+            method: 'PATCH', body: JSON.stringify({ name: name.trim() }), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
+          current.list.name = name.trim();
+          renderList(current);
+        } catch (e) { reportWriteError(e); }
+      });
     }
 
-    async function deleteList() {
+    async function deleteList(btn) {
       if (!requireOnline()) return;
       if (!await askConfirm('Delete "' + current.list.name + '" and all its items? This can\'t be undone.')) return;
-      try {
-        await api('/api/lists/' + current.list.id, { method: 'DELETE' });
-        location.hash = '#/';
-      } catch (e) { toast(e.message); }
+      await withBusy(btn, async () => {
+        try {
+          await api('/api/lists/' + current.list.id, { method: 'DELETE', timeoutMs: MUTATION_TIMEOUT_MS });
+          location.hash = '#/';
+        } catch (e) {
+          // A timed-out delete may have gone through, so go back to My Lists
+          // and let it show whether the list is still there.
+          if (e.timeout) { toast("We didn't hear back — checking…"); location.hash = '#/'; return; }
+          toast(e.message);
+        }
+      });
     }
 
     // --- category actions ----------------------------------------------------------
     async function addCategory(ev) {
       ev.preventDefault();
-      const input = ev.target.elements.name;
+      const form = ev.target;
+      const input = form.elements.name;
       const name = input.value.trim();
       if (!name) return false;
       if (!requireOnline()) return false;
       input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
-      try {
-        const { category } = await api('/api/lists/' + current.list.id + '/categories', { method: 'POST', body: JSON.stringify({ name }) });
-        current.categories.push(category);
-        // The form itself isn't re-rendered, so input focus (when it still
-        // has it) survives on its own.
-        repaintAllCategories();
-      } catch (e) { toast(e.message); input.value = name; }
+      withBusy(form, async () => {
+        try {
+          const { category } = await api('/api/lists/' + current.list.id + '/categories', {
+            method: 'POST', body: JSON.stringify({ name }), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
+          current.categories.push(category);
+          // The form itself isn't re-rendered, so input focus (when it still
+          // has it) survives on its own.
+          repaintAllCategories();
+        } catch (e) {
+          // Only offer the text back when we know it didn't land — restoring it
+          // after a timeout invites a duplicate category.
+          if (!reportWriteError(e)) input.value = name;
+        }
+      });
       return false;
     }
 
@@ -1617,14 +2115,16 @@
       const name = await askText('Rename category:', cat ? cat.name : '');
       if (!name || !name.trim()) return;
       try {
-        await api('/api/categories/' + id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
+        await api('/api/categories/' + id, {
+          method: 'PATCH', body: JSON.stringify({ name: name.trim() }), timeoutMs: MUTATION_TIMEOUT_MS,
+        });
         cat.name = name.trim();
         repaintCategory(id);
-      } catch (e) { toast(e.message); }
+      } catch (e) { reportWriteError(e); }
     }
 
     // Any category can be deleted (with its items) except the last one.
-    async function deleteCategory(id) {
+    async function deleteCategory(id, btn) {
       if (!requireOnline()) return;
       if (current.categories.length <= 1) {
         return toast("Can't delete the only category — lists need at least one");
@@ -1634,161 +2134,143 @@
       const msg = 'Delete category "' + (cat ? cat.name : '') + '"' +
         (n ? ' and its ' + n + ' item' + (n > 1 ? 's' : '') : '') + '?';
       if (!await askConfirm(msg)) return;
-      try {
-        await api('/api/categories/' + id, { method: 'DELETE' });
-        current.categories = current.categories.filter(c => c.id !== id);
-        current.items = current.items.filter(i => i.category_id !== id);
-        const el = document.getElementById('cat-' + id);
-        if (el) el.remove();
-        wireNative(); // re-index the reorder instances after the removal
-      } catch (e) { toast(e.message); }
+      await withBusy(btn, async () => {
+        try {
+          await api('/api/categories/' + id, { method: 'DELETE', timeoutMs: MUTATION_TIMEOUT_MS });
+          current.categories = current.categories.filter(c => c.id !== id);
+          current.items = current.items.filter(i => i.category_id !== id);
+          const el = document.getElementById('cat-' + id);
+          if (el) el.remove();
+          wireNative(); // re-index the reorder instances after the removal
+        } catch (e) { reportWriteError(e); }
+      });
     }
 
     // --- item actions ---------------------------------------------------------------
+    // The four daily-use actions never await the network. Each one records the
+    // change in the queue (a synchronous localStorage write), applies it to the
+    // local state and repaints — so the row moves the instant it is tapped,
+    // whether the connection is fast, crawling or gone. The sender drains in
+    // the background and reconciles when it lands.
 
     // Quick-add: the always-visible field above the list; items land in the
     // default (uncategorized) bucket. The form lives outside #cats, so the
     // full repaint below never disturbs its focus.
-    async function quickAdd(ev) {
+    function quickAdd(ev) {
       ev.preventDefault();
       const input = ev.target.elements.text;
       const text = input.value.trim();
       if (!text) return false;
-      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
+      input.value = '';
+      // A local bucket must exist to hold the row; the list-level POST is what
+      // decides where it really goes (and creates the bucket server-side).
+      const bucket = current.categories.find(c => c.is_default) || current.categories[0];
+      if (!bucket) { input.value = text; toast('This list has no category to add to'); return false; }
       const tempId = tempSeq--;
-      try {
-        const data = await mutate({
-          type: 'add', itemId: tempId, method: 'POST',
-          path: '/api/lists/' + current.list.id + '/items', body: { text },
-        });
-        let item;
-        if (data) {
-          item = data.item;
-          if (data.category && !current.categories.some(c => c.id === data.category.id)) {
-            current.categories.unshift(data.category); // bucket created on demand server-side
-          }
-        } else {
-          // Queued offline — a local bucket must exist to hold the item; the
-          // replay's list-level POST puts it in the right place server-side.
-          const bucket = current.categories.find(c => c.is_default) || current.categories[0];
-          item = offlineNewItem(tempId, bucket.id, text);
-        }
-        current.items.push(item);
-        cacheList();
-        repaintAllCategories();
-      } catch (e) { toast(e.message); input.value = text; }
+      if (!commit({ type: 'add', itemId: tempId, method: 'POST',
+                    path: '/api/lists/' + current.list.id + '/items', body: { text } })) {
+        input.value = text;
+        return false;
+      }
+      current.items.push(localNewItem(tempId, bucket.id, text));
+      cacheList();
+      repaintAllCategories();
       return false;
     }
 
-    async function addItem(ev, categoryId) {
+    function addItem(ev, categoryId) {
       ev.preventDefault();
       const input = ev.target.elements.text;
       const text = input.value.trim();
       if (!text) return false;
-      input.value = ''; // before the await: a trailing keyboard-done blur finds it empty
+      input.value = '';
       const wasFullyDone = isCatFullyDone(categoryId);
       const tempId = tempSeq--;
-      try {
-        const data = await mutate({
-          type: 'add', itemId: tempId, method: 'POST',
-          path: '/api/categories/' + categoryId + '/items', body: { text },
-        });
-        const item = data ? data.item : offlineNewItem(tempId, categoryId, text);
-        current.items.push(item); // server gives it the smallest sort_order → top of the active list
-        cacheList();
-        if (wasFullyDone) {
-          // The section was rendered compact (inline done toggle, tight
-          // spacing) and is now active again — a surgical insert would leave
-          // that stale, so repaint the whole section and restore focus.
-          repaintCategory(categoryId);
-          const fresh = document.querySelector('#cat-' + categoryId + ' input[name=text]');
-          if (fresh) fresh.focus({ preventScroll: true });
-        } else {
-          // Insert just the new row; the form (and its focus) is untouched,
-          // so the view stays perfectly still. wireNative picks up the new
-          // row (it has no data-wired flag yet) without touching the form.
-          const body = document.querySelector('#cat-' + categoryId + ' .active-items');
-          if (body) {
-            const ph = body.querySelector('.empty-note');
-            if (ph) ph.remove();
-            body.insertAdjacentHTML('afterbegin', renderItem(item));
-            wireNative();
-          }
+      if (!commit({ type: 'add', itemId: tempId, method: 'POST',
+                    path: '/api/categories/' + categoryId + '/items', body: { text } })) {
+        input.value = text;
+        return false;
+      }
+      const item = localNewItem(tempId, categoryId, text);
+      current.items.push(item); // smallest sort_order → top of the active list
+      cacheList();
+      if (wasFullyDone) {
+        // The section was rendered compact (inline done toggle, tight
+        // spacing) and is now active again — a surgical insert would leave
+        // that stale, so repaint the whole section and restore focus.
+        repaintCategory(categoryId);
+        const fresh = document.querySelector('#cat-' + categoryId + ' input[name=text]');
+        if (fresh) fresh.focus({ preventScroll: true });
+      } else {
+        // Insert just the new row; the form (and its focus) is untouched,
+        // so the view stays perfectly still. wireNative picks up the new
+        // row (it has no data-wired flag yet) without touching the form.
+        const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+        if (body) {
+          const ph = body.querySelector('.empty-note');
+          if (ph) ph.remove();
+          body.insertAdjacentHTML('afterbegin', renderItem(item));
+          wireNative();
         }
-      } catch (e) { toast(e.message); input.value = text; }
+      }
       return false;
     }
 
-    async function toggleItem(id, checked) {
-      // Capture done-visibility before the mutation: checking the last open
-      // item flips the category to fully done, which defaults to collapsed.
-      const before = current.items.find(i => i.id === id);
-      const wasShowingDone = before ? catShowDone(before.category_id) : false;
-      try {
-        const data = await mutate({
-          type: 'toggle', itemId: id, method: 'PATCH',
-          path: '/api/items/' + id, body: { checked },
-        });
-        let item;
-        if (data) {
-          item = data.item;
-        } else {
-          // Queued offline — mirror the server's move-to-section-bottom.
-          item = current.items.find(i => i.id === id);
-          if (!item) return;
-          item.checked = checked;
-          item.completed_at = checked ? new Date().toISOString() : null;
-          item.last_checked_by = me || item.last_checked_by;
-          item.sort_order = current.items
-            .filter(i => i.category_id === item.category_id && !!i.checked === checked && i.id !== id)
-            .reduce((m, i) => Math.max(m, i.sort_order), 0) + 1;
-        }
-        const idx = current.items.findIndex(i => i.id === id);
-        if (idx !== -1) current.items[idx] = item;
-        cacheList();
-        // Keep a newly fully-done category expanded only if its done items
-        // were already visible, so the rows the user is looking at don't
-        // vanish mid-interaction. A category the user had collapsed stays
-        // collapsed — checking its last item must not pop it open.
-        if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
-        repaintCategory(item.category_id);
-      } catch (e) { toast(e.message); refreshList(); }
+    function toggleItem(id, checked) {
+      const item = current.items.find(i => i.id === id);
+      if (!item) return;
+      // Capture done-visibility first: checking the last open item flips the
+      // category to fully done, which defaults to collapsed.
+      const wasShowingDone = catShowDone(item.category_id);
+      const undo = { checked: item.checked, completed_at: item.completed_at,
+                     last_checked_by: item.last_checked_by, sort_order: item.sort_order };
+      if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
+                    path: '/api/items/' + id, body: { checked }, undo })) return;
+      // Mirror the server's move-to-section-bottom so the row lands exactly
+      // where the eventual refetch will put it.
+      item.checked = checked;
+      item.completed_at = checked ? new Date().toISOString() : null;
+      item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
+      item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
+      cacheList();
+      // Keep a newly fully-done category expanded only if its done items
+      // were already visible, so the rows the user is looking at don't
+      // vanish mid-interaction. A category the user had collapsed stays
+      // collapsed — checking its last item must not pop it open.
+      if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
+      repaintCategory(item.category_id);
     }
 
     async function editItem(id) {
-      const item = current.items.find(i => i.id === id);
-      const text = await askText('Edit item:', item ? item.text : '');
+      const existing = current.items.find(i => i.id === id);
+      const text = await askText('Edit item:', existing ? existing.text : '');
       if (!text || !text.trim()) return;
-      try {
-        const data = await mutate({
-          type: 'edit', itemId: id, method: 'PATCH',
-          path: '/api/items/' + id, body: { text: text.trim() },
-        });
-        const idx = current.items.findIndex(i => i.id === id);
-        if (idx === -1) return;
-        if (data) current.items[idx] = data.item;
-        else current.items[idx] = { ...current.items[idx], text: text.trim() };
-        cacheList();
-        repaintCategory(current.items[idx].category_id);
-      } catch (e) { toast(e.message); }
+      const idx = current.items.findIndex(i => i.id === id);
+      if (idx === -1) return; // deleted while the prompt was open
+      if (!commit({ type: 'edit', itemId: id, method: 'PATCH',
+                    path: '/api/items/' + id, body: { text: text.trim() },
+                    undo: { text: current.items[idx].text } })) return;
+      current.items[idx] = { ...current.items[idx], text: text.trim() };
+      cacheList();
+      repaintCategory(current.items[idx].category_id);
     }
 
-    async function deleteItem(id) {
+    function deleteItem(id) {
       const item = current.items.find(i => i.id === id);
-      try {
-        if (isTempId(id)) {
-          // The item only exists in the offline queue — cancel its pending ops.
-          saveQueue(loadQueue().filter(o => o.itemId !== id));
-        } else {
-          await mutate({ type: 'delete', itemId: id, method: 'DELETE', path: '/api/items/' + id });
-        }
-        current.items = current.items.filter(i => i.id !== id);
-        cacheList();
-      } catch (e) { toast(e.message); }
-      // Repaint on failure too: a full-swipe delete already collapsed the row
-      // out of the DOM (the kit removes it before calling this handler), so a
-      // failed API delete must restore it.
-      if (item) repaintCategory(item.category_id);
+      if (!item) return;
+      // An item whose create is still queued has never existed server-side, so
+      // coalesce() cancels both ops and nothing is sent.
+      if (!commit({ type: 'delete', itemId: id, method: 'DELETE',
+                    path: '/api/items/' + id, undo: item })) {
+        // Couldn't even record the intent — put the row back. A full-swipe
+        // delete has already collapsed it out of the DOM (the kit removes it
+        // before calling this handler).
+        repaintCategory(item.category_id);
+        return;
+      }
+      current.items = current.items.filter(i => i.id !== id);
+      cacheList();
+      repaintCategory(item.category_id);
     }
 
     // --- markdown import / export ------------------------------------------------
@@ -1984,43 +2466,59 @@
         readonly: false,
         actionsHtml: mode === 'new' ? `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
-          <button onclick="runImport('new')" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import</button>` : `
+          <button onclick="runImport('new', this)" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import</button>` : `
           <button onclick="closeMd()" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Cancel</button>
-          <button onclick="runImport('replace')" class="text-sm px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white">Import (replace)</button>
-          <button onclick="runImport('add')" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import (add)</button>`,
+          <button onclick="runImport('replace', this)" class="text-sm px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white">Import (replace)</button>
+          <button onclick="runImport('add', this)" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Import (add)</button>`,
       });
     }
 
-    async function runImport(mode) {
+    // A whole-list write, so it gets the longest deadline — and a guard, because
+    // a double-tapped import is a duplicated list.
+    let importing = false;
+    async function runImport(mode, btn) {
       if (!requireOnline()) return;
+      if (importing) return;
       const md = document.getElementById('md-text').value;
       const { name, categories } = parseMarkdown(md);
       if (!categories.length || !categories.some(c => c.items.length)) {
         return toast('Nothing to import — expected bullets like "* Category" with "  * item" beneath');
       }
+      if (mode === 'replace' &&
+          !await askConfirm('Replace everything in "' + current.list.name + '" with the imported content?', 'Replace')) {
+        return;
+      }
+      importing = true;
       try {
-        if (mode === 'new') {
-          const { list } = await api('/api/lists/import', {
-            method: 'POST',
-            body: JSON.stringify({ name: name || 'Imported list', categories }),
-          });
-          closeMd();
-          if (location.hash === '#/list/' + list.id) loadList(list.id);
-          else location.hash = '#/list/' + list.id;
-        } else {
-          if (mode === 'replace' &&
-              !await askConfirm('Replace everything in "' + current.list.name + '" with the imported content?', 'Replace')) {
-            return;
+      await withBusy(btn, async () => {
+        try {
+          if (mode === 'new') {
+            const { list } = await api('/api/lists/import', {
+              method: 'POST',
+              body: JSON.stringify({ name: name || 'Imported list', categories }),
+              timeoutMs: IMPORT_TIMEOUT_MS,
+            });
+            closeMd();
+            if (location.hash === '#/list/' + list.id) loadList(list.id);
+            else location.hash = '#/list/' + list.id;
+          } else {
+            await api('/api/lists/' + current.list.id + '/import', {
+              method: 'POST',
+              body: JSON.stringify({ categories, mode }),
+              timeoutMs: IMPORT_TIMEOUT_MS,
+            });
+            closeMd();
+            toast(mode === 'replace' ? 'List replaced' : 'Imported');
+            refreshList();
           }
-          await api('/api/lists/' + current.list.id + '/import', {
-            method: 'POST',
-            body: JSON.stringify({ categories, mode }),
-          });
-          closeMd();
-          toast(mode === 'replace' ? 'List replaced' : 'Imported');
-          refreshList();
+        } catch (e) {
+          // A big import is exactly the request most likely to outrun its
+          // deadline while still landing, so close up and go look.
+          if (e.timeout) closeMd();
+          reportWriteError(e);
         }
-      } catch (e) { toast(e.message); }
+      });
+      } finally { importing = false; }
     }
 
     // --- members modal ----------------------------------------------------------------
@@ -2059,7 +2557,7 @@
           ${current.members.map(m => `
             <div class="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--fill)]">
               <span class="text-sm">@${esc(m.username)}</span>
-              ${isOwner && !m.shot ? `<button onclick="removeMember(${m.id})" class="x-close hover:!text-red-500 text-xs shrink-0">Remove</button>` : ''}
+              ${isOwner && !m.shot ? `<button onclick="removeMember(${m.id}, this)" class="x-close hover:!text-red-500 text-xs shrink-0">Remove</button>` : ''}
             </div>`).join('')}
           ${!current.members.length ? '<p class="text-xs px-2 py-1 flex items-center gap-1.5" style="color: var(--label3)">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
         </div>
@@ -2075,35 +2573,47 @@
       `;
     }
 
-    async function inviteMember(ev) {
-      if (!isOnline()) { ev.preventDefault(); requireOnline(); return false; }
+    function inviteMember(ev) {
       ev.preventDefault();
-      const input = ev.target.elements.username;
+      if (!isOnline()) { requireOnline(); return false; }
+      const form = ev.target;
+      const input = form.elements.username;
       const username = input.value.trim();
       if (!username) return false;
-      try {
-        await api('/api/lists/' + current.list.id + '/members', { method: 'POST', body: JSON.stringify({ username }) });
-        current = await api('/api/lists/' + current.list.id);
-        renderList(current);
-        renderMembers(); // modal stays open; refresh its body
-        toast('@' + username.replace(/^@/, '') + ' added');
-      } catch (e) { toast(e.message); }
+      withBusy(form, async () => {
+        try {
+          await api('/api/lists/' + current.list.id + '/members', {
+            method: 'POST', body: JSON.stringify({ username }), timeoutMs: MUTATION_TIMEOUT_MS,
+          });
+          current = await api('/api/lists/' + current.list.id, { timeoutMs: LOAD_TIMEOUT_MS });
+          renderList(current);
+          renderMembers(); // modal stays open; refresh its body
+          toast('@' + username.replace(/^@/, '') + ' added');
+        } catch (e) { reportWriteError(e); }
+      });
       return false;
     }
 
-    async function removeMember(memberId) {
+    async function removeMember(memberId, btn) {
       if (!requireOnline()) return;
-      try {
-        await api('/api/lists/' + current.list.id + '/members/' + memberId, { method: 'DELETE' });
-        current = await api('/api/lists/' + current.list.id);
-        renderList(current);
-        renderMembers(); // modal stays open; refresh its body
-      } catch (e) { toast(e.message); }
+      await withBusy(btn, async () => {
+        try {
+          await api('/api/lists/' + current.list.id + '/members/' + memberId, {
+            method: 'DELETE', timeoutMs: MUTATION_TIMEOUT_MS,
+          });
+          current = await api('/api/lists/' + current.list.id, { timeoutMs: LOAD_TIMEOUT_MS });
+          renderList(current);
+          renderMembers(); // modal stays open; refresh its body
+        } catch (e) { reportWriteError(e); }
+      });
     }
 
     applyTheme();
     renderStrip();
-    if (queueLength()) attemptReplay();
+    // A queue left over from a previous session: arm the row/strip hints and
+    // start sending before anything else, so the first paint is already honest
+    // about what hasn't reached the server.
+    if (queueLength()) { syncHints(true); drain(); }
     route();
 
     // --- service worker ---------------------------------------------------------
