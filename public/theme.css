@@ -6,7 +6,9 @@
 
 /* ── Series brand palette — paper/ink with the teal accent (Appendix A).
    Destructive red stays systemRed: a safety convention, not a guilt
-   mechanic (the app has no overdue/shame styling — it's dateless). ── */
+   mechanic. It is also the overdue colour on a due-date chip — stating a
+   fact about a date that has passed, never a scold: a ticked item is never
+   overdue, and lists without due dates (the default) never show it. ── */
 :root {
   --bg: #FAF6EE;                      /* paper */
   --card: #ffffff;

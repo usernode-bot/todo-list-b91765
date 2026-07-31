@@ -74,6 +74,29 @@
       "path": "/?shot=slow",
       "expectSelector": "#offline-chip",
       "expectText": "Slow connection"
+    },
+    {
+      "name": "An empty category offers a tappable way to add the first item",
+      "path": "/?shot=empty",
+      "expectSelector": "button.empty-note.un-touch-target",
+      "expectText": "No items yet"
+    },
+    {
+      "name": "Undo is available in the list header after a change",
+      "path": "/?shot=undo",
+      "expectSelector": "#undo-btn[aria-disabled=false]:not([disabled])"
+    },
+    {
+      "name": "A list with due dates on shows a due chip per item",
+      "path": "/?shot=due",
+      "expectSelector": ".item-row .due-chip[data-due]",
+      "expectText": "Today"
+    },
+    {
+      "name": "The due-date editor opens on the phone-width card",
+      "path": "/?shot=dueeditor",
+      "expectSelector": ".un-modal.modal-narrow .modal-card #due-editor #due-date-input",
+      "expectText": "Due date"
     }
   ],
   "visibility": {

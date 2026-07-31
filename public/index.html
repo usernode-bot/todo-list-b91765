@@ -266,6 +266,15 @@
     // neither is reachable by navigation. Display-only, in every environment.
     const shotLoading = shot === 'loading';
     const shotPending = shot === 'pending';
+    // Screenshot/test deep links for the states this change introduces: an
+    // empty category's tappable "No items yet" row (?shot=empty), the header
+    // with undo available (?shot=undo), a list with due dates on (?shot=due)
+    // and the due-date editor modal (?shot=dueeditor). All four live behind a
+    // tap or a mutation, so navigation alone can't reach them. UI state only.
+    const shotEmpty = shot === 'empty';
+    const shotUndo = shot === 'undo';
+    const shotDue = shot === 'due';
+    const shotDueEditor = shot === 'dueeditor';
 
     // Deadlines. Every request gets one: without them a stalled TCP connection
     // hangs the promise for as long as the browser's own timeout (often
@@ -606,7 +615,7 @@
     // silently drop the newer value.
     function coalesce(q, op) {
       const first = replaying ? 1 : 0;
-      if (op.type === 'toggle' || op.type === 'edit') {
+      if (op.type === 'toggle' || op.type === 'edit' || op.type === 'due') {
         // Last write wins per item — but keep the ORIGINAL op's undo payload,
         // which is the state before the whole burst started.
         for (let i = q.length - 1; i >= first; i--) {
@@ -695,7 +704,7 @@
         adoptServerItem(op.itemId, data);
         return;
       }
-      if (op.type === 'toggle' || op.type === 'edit') {
+      if (op.type === 'toggle' || op.type === 'edit' || op.type === 'due') {
         if (!isTempId(op.itemId)) {
           await api('/api/items/' + op.itemId, {
             method: 'PATCH', body: JSON.stringify(op.body), timeoutMs: MUTATION_TIMEOUT_MS,
@@ -725,6 +734,16 @@
         || !!local.checked !== !!item.checked
         || local.category_id !== item.category_id;
       current.items[idx] = { ...local, ...item };
+      // A due date set on the row while its create was still in flight is not
+      // on the server yet (its own op is queued behind this one), so the
+      // server's NULLs must not wipe the chip the user is looking at.
+      if (loadQueue().some(o => o.type === 'due' && o.itemId === tempId)) {
+        current.items[idx].due_date = local.due_date;
+        current.items[idx].due_time = local.due_time;
+      }
+      // Undo history holds ids too — re-point it, or the first undo after a
+      // create lands would address a row that no longer exists.
+      remapHistoryId(tempId, item.id);
       cacheList();
       if (visiblyChanged) { repaintAllCategories(); return; }
       // Row handlers all resolve their id from data-item at tap time, so
@@ -860,7 +879,8 @@
         .filter(i => i.category_id === categoryId && !i.checked)
         .reduce((m, i) => Math.min(m, i.sort_order), 1);
       return { id, category_id: categoryId, text, checked: false, sort_order: min - 1,
-               completed_at: null, created_by: me, last_checked_by: null };
+               completed_at: null, created_by: me, last_checked_by: null,
+               due_date: null, due_time: null };
     }
 
     // Where the server would move a row inside its section after a toggle
@@ -893,6 +913,9 @@
           d.items.splice(idx, 1);
         } else if (op.type === 'edit') {
           d.items[idx] = { ...d.items[idx], text: op.body.text };
+        } else if (op.type === 'due') {
+          d.items[idx] = { ...d.items[idx],
+            due_date: op.body.due_date, due_time: op.body.due_time };
         } else if (op.type === 'toggle') {
           const it = d.items[idx], checked = !!op.body.checked;
           d.items[idx] = { ...it, checked,
@@ -1097,6 +1120,19 @@
       }
     }
 
+    // "No items yet" is the largest thing on an empty category and used to be
+    // inert text, which read as "nothing to do here" (issue #44). It is now the
+    // obvious way in: tapping it opens that category's adder. Already open —
+    // e.g. a stray second tap — just puts the caret back.
+    function emptyNoteTap(catId) {
+      if (openAdders.has(catId)) {
+        const input = document.querySelector('#cat-' + catId + ' input[name=text]');
+        if (input) input.focus();
+        return;
+      }
+      toggleAdder(catId);
+    }
+
     // --- live updates (SSE) ----------------------------------------------------
     // While a list is open, subscribe to its event stream; any change made by
     // another client triggers a silent refetch. EventSource retries transient
@@ -1177,6 +1213,9 @@
       else if (shotPending) loadShotPending();
       else if (shotSearch) loadShotSearch();
       else if (shotModal) loadShotModal();
+      else if (shotEmpty) loadShotEmpty();
+      else if (shotUndo) loadShotUndo();
+      else if (shotDue || shotDueEditor) loadShotDue();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -1286,12 +1325,65 @@
       openMembers();
     }
 
+    // Screenshot-state deep link — `/?shot=empty` opens a list on a category
+    // with no items, because the tappable "No items yet" row (issue #44) only
+    // exists there. Read-only: it looks for an empty category and shows it.
+    async function loadShotEmpty() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      for (const l of lists) {
+        let d = null;
+        try { d = await api('/api/lists/' + l.id); } catch (_) {}
+        if (!d) continue;
+        // The default bucket renders nothing when empty, so it doesn't count.
+        const hit = d.categories.some(c =>
+          !c.is_default && !d.items.some(i => i.category_id === c.id));
+        if (hit) return loadList(l.id);
+      }
+      return loadList(lists[0].id);
+    }
+
+    // Screenshot-state deep link — `/?shot=undo` opens a list with the undo
+    // button live, which otherwise takes a mutation to reach. The entry it
+    // stages describes a change already on screen, so nothing is written.
+    async function loadShotUndo() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(lists[0].id);
+      if (!current || !current.items.length) return;
+      const item = current.items[0];
+      undoStack = [{ kind: 'toggle', itemId: item.id,
+                     before: { checked: !!item.checked }, after: { checked: !item.checked } }];
+      redoStack = [];
+      syncUndoChrome();
+    }
+
+    // Screenshot-state deep links — `/?shot=due` opens a list with due dates
+    // on (chips, "Today", the overdue row) and `/?shot=dueeditor` opens the
+    // editor on top of it. Both are display-only: the switch is flipped in the
+    // local copy when no dated list exists, and neither one PATCHes anything.
+    async function loadShotDue() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      const target = lists.find(l => l.due_dates_enabled) || lists[0];
+      await loadList(target.id);
+      if (!current) return;
+      if (!datesOn()) { current.list.due_dates_enabled = true; renderList(current); }
+      if (!shotDueEditor) return;
+      const item = current.items.find(i => i.due_date) || current.items[0];
+      if (item) openDueEditor(item.id);
+    }
+
     // --- Home / My Lists -------------------------------------------------------
     // Guards against a slow load painting over a newer navigation.
     let loadSeq = 0;
 
     async function loadHome() {
       current = null;
+      clearHistory(); // undo is scoped to the open list
       disconnectEvents();
       const app = document.getElementById('app');
       const type = lastScreen === 'list' ? 'pop' : 'none';
@@ -1443,6 +1535,9 @@
       // link staged a query for this navigation.
       searchQuery = pendingSearch;
       pendingSearch = '';
+      // Switching lists (or a first open) starts with an empty history; a plain
+      // reload of the list already open keeps it.
+      if (!current || String(current.list.id) !== String(id)) clearHistory();
       const app = document.getElementById('app');
       const type = lastScreen === 'home' ? 'push' : 'none';
       const seq = ++loadSeq;
@@ -1542,10 +1637,199 @@
     }
 
     // Items of one section (unchecked or checked) of a category, in order.
+    // With due dates on, the order is chronological instead of manual: soonest
+    // first, undated last, ties falling back to the manual order. Sorted here on
+    // the client rather than in SQL so it holds for a cached list, an offline
+    // edit and a still-queued add exactly as it does for a fresh fetch.
     function sectionItems(catId, checked) {
-      return current.items
-        .filter(i => i.category_id === catId && !!i.checked === checked)
-        .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
+      const rows = current.items.filter(i => i.category_id === catId && !!i.checked === checked);
+      const manual = (a, b) => (a.sort_order - b.sort_order) || (a.id - b.id);
+      if (!datesOn()) return rows.sort(manual);
+      return rows.sort((a, b) => {
+        const ad = a.due_date || '', bd = b.due_date || '';
+        if (ad !== bd) {
+          if (!ad) return 1;   // undated sinks below everything with a date
+          if (!bd) return -1;
+          return ad < bd ? -1 : 1;
+        }
+        // Same day: a timed item comes before an all-day one.
+        const at = a.due_time || '', bt = b.due_time || '';
+        if (ad && at !== bt) {
+          if (!at) return 1;
+          if (!bt) return -1;
+          return at < bt ? -1 : 1;
+        }
+        return manual(a, b);
+      });
+    }
+
+    // --- due dates (issue #38) --------------------------------------------------
+    // Off by default and per list: a list only grows dates when its owner asks
+    // for them, and every other list stays exactly as it was. Values are
+    // wall-clock (YYYY-MM-DD + HH:MM strings end to end, never Date instants),
+    // so "the 3rd at 9am" reads back the same in every timezone.
+    const datesOn = () => !!(current && current.list && current.list.due_dates_enabled);
+    const LOCALE = (jwt && jwt.locale) || undefined;
+
+    function todayISO() {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function nowHM() {
+      const d = new Date();
+      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+    function parseISODate(s) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+      return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+    }
+    function fmtDueTime(t) {
+      const m = /^(\d{1,2}):(\d{2})/.exec(t || '');
+      if (!m) return '';
+      try {
+        return new Date(2000, 0, 1, +m[1], +m[2])
+          .toLocaleTimeString(LOCALE, { hour: 'numeric', minute: '2-digit' });
+      } catch (_) { return t; }
+    }
+
+    // Short, human label for the chip: the nearby days get names, the rest get
+    // a date. Deliberately never "in 3 days" — a weekday is easier to act on.
+    function dueLabel(i) {
+      const d = parseISODate(i.due_date);
+      if (!d) return '';
+      const t = parseISODate(todayISO());
+      const diff = Math.round((d - t) / 86400000);
+      let day;
+      if (diff === 0) day = 'Today';
+      else if (diff === 1) day = 'Tomorrow';
+      else if (diff === -1) day = 'Yesterday';
+      else if (diff > 1 && diff < 7) day = d.toLocaleDateString(LOCALE, { weekday: 'short' });
+      else {
+        const opts = { month: 'short', day: 'numeric' };
+        if (d.getFullYear() !== t.getFullYear()) opts.year = 'numeric';
+        day = d.toLocaleDateString(LOCALE, opts);
+      }
+      return day + (i.due_time ? ' · ' + fmtDueTime(i.due_time) : '');
+    }
+
+    // Overdue is a fact worth colouring, not a scolding: a ticked item is never
+    // overdue, and an all-day item is due all day (not at 00:00).
+    function isOverdue(i) {
+      if (!i.due_date || i.checked) return false;
+      const today = todayISO();
+      if (i.due_date < today) return true;
+      if (i.due_date > today) return false;
+      return !!i.due_time && i.due_time < nowHM();
+    }
+
+    // Applies a due date/time change: local first, queued for the server, and
+    // recorded for undo — the same shape as every other item mutation, so it
+    // works offline too. Passing a null date clears the time with it.
+    function applyDue(id, date, time) {
+      const idx = current.items.findIndex(i => i.id === id);
+      if (idx === -1) return false;
+      const it = current.items[idx];
+      const before = { due_date: it.due_date || null, due_time: it.due_time || null };
+      const after = { due_date: date || null, due_time: date ? (time || null) : null };
+      if (before.due_date === after.due_date && before.due_time === after.due_time) return true;
+      if (!commit({ type: 'due', itemId: id, method: 'PATCH',
+                    path: '/api/items/' + id, body: after, undo: before })) return false;
+      current.items[idx] = { ...it, ...after };
+      record({ kind: 'due', itemId: id, before, after });
+      cacheList();
+      repaintCategory(it.category_id);
+      return true;
+    }
+
+    // The issue asked for a time field under every item; a row is the wrong
+    // place for one — rows are destroyed and rebuilt by every repaint, and at
+    // 390px there is no room beside the text. So the row carries a chip and the
+    // chip opens this editor, which uses the platform's own date/time pickers
+    // (the kit deliberately leaves those inputs alone).
+    let dueModal = null;
+    function openDueEditor(id) {
+      const item = current && current.items.find(i => i.id === id);
+      if (!item) return;
+      if (!window.unNative) { toast('The due-date editor needs the UI kit, which failed to load'); return; }
+      if (dueModal) dueModal.dismiss();
+      const el = document.createElement('div');
+      el.id = 'due-editor';
+      el.className = 'flex flex-col gap-3';
+      el.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-semibold text-lg">Due date</h2>
+          <button onclick="closeDueEditor()" class="x-close text-xl leading-none px-1 shrink-0">&times;</button>
+        </div>
+        <p class="text-[13px] break-words" style="color: var(--label2)">${esc(item.text)}</p>
+        <label class="flex items-center justify-between gap-3 text-[15px]">
+          <span>Date</span>
+          <input id="due-date-input" type="date" value="${esc(item.due_date || '')}"
+                 class="rounded-lg px-2.5 py-2 text-[15px] focus:outline-none"
+                 style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
+        </label>
+        <label class="flex items-center justify-between gap-3 text-[15px]">
+          <span>Time <span style="color: var(--label3)">(optional)</span></span>
+          <input id="due-time-input" type="time" value="${esc(item.due_time || '')}"
+                 class="rounded-lg px-2.5 py-2 text-[15px] focus:outline-none"
+                 style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
+        </label>
+        <div class="flex flex-wrap justify-end gap-2 pt-1">
+          ${item.due_date ? `<button onclick="clearDue(${id})" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Clear</button>` : ''}
+          <button onclick="saveDue(${id})" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Save</button>
+        </div>
+      `;
+      const handle = presentAppModal(el, {
+        onDismiss: () => { if (dueModal === handle) dueModal = null; },
+      });
+      dueModal = handle;
+    }
+    function closeDueEditor() {
+      if (dueModal) dueModal.dismiss();
+    }
+    function saveDue(id) {
+      const date = (document.getElementById('due-date-input') || {}).value || '';
+      const time = (document.getElementById('due-time-input') || {}).value || '';
+      if (!date && time) { toast('Pick a date first — a time on its own has nothing to be due on'); return; }
+      applyDue(id, date || null, time ? time.slice(0, 5) : null);
+      closeDueEditor();
+    }
+    function clearDue(id) {
+      applyDue(id, null, null);
+      closeDueEditor();
+    }
+
+    // Owner-only, and only ever explicit: flipping this off leaves the dates on
+    // disk, so turning it back on restores them rather than destroying them.
+    async function setDueDates(v) {
+      if (!current) return;
+      if (!isOnline()) { requireOnline(); syncDueSwitch(); return; }
+      const prev = !!current.list.due_dates_enabled;
+      current.list.due_dates_enabled = !!v;
+      cacheList();
+      renderList(current); // sorting, chips and drag availability all change
+      closeDrawer();
+      try {
+        await api('/api/lists/' + current.list.id, {
+          method: 'PATCH', body: JSON.stringify({ due_dates_enabled: !!v }),
+          timeoutMs: MUTATION_TIMEOUT_MS,
+        });
+        toast(v ? 'Due dates on — this list now sorts by date' : 'Due dates off');
+      } catch (e) {
+        current.list.due_dates_enabled = prev;
+        cacheList();
+        renderList(current);
+        reportWriteError(e);
+      }
+    }
+    function syncDueSwitch() {
+      document.querySelectorAll('.due-switch').forEach(sw => { sw.checked = datesOn(); });
+    }
+
+    // The row handle stays visible in a dated list — as an explanation rather
+    // than a dead control, since the reason it doesn't drag isn't obvious.
+    function dateSortHint() {
+      toast('This list is sorted by due date — turn due dates off to reorder by hand');
     }
 
     // Display order is the manual drag order (current.categories) — static —
@@ -1574,6 +1858,13 @@
           <span>Show completed</span>
           <input type="checkbox" class="un-switch" ${showCompleted() ? 'checked' : ''} onchange="setShowCompleted(this.checked)">
         </label>
+        ${isOwner && current ? `
+        <!-- Off by default, per list, owner-only (issue #38). The class rather
+             than an id: this markup renders twice (dropdown + bottom sheet). -->
+        <label class="${c} cursor-pointer">
+          <span>Include due dates</span>
+          <input type="checkbox" class="un-switch due-switch" ${datesOn() ? 'checked' : ''} onchange="setDueDates(this.checked)">
+        </label>` : ''}
         <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
         <button onclick="closeDrawer(); openImport('merge')" class="needs-net ${c}">Import markdown</button>
         <button onclick="cycleTheme()" data-theme-label class="${c}">Theme: ${themeLabel()}</button>
@@ -1588,9 +1879,20 @@
         <header id="list-bar" class="un-navbar un-safe-top">
           <div class="w-full max-w-2xl mx-auto h-12 flex items-center justify-between gap-1 px-2 relative">
             <a href="#/" title="Back to My Lists" class="un-navbar-back flex items-center text-[17px] pl-1.5 pr-2 py-1.5 shrink-0">Lists</a>
-            <h1 id="list-title" class="un-navbar-title absolute left-1/2 -translate-x-1/2 max-w-[44%] truncate text-center${isOwner ? ' cursor-pointer' : ''}"
+            <h1 id="list-title" class="un-navbar-title absolute left-1/2 -translate-x-1/2 max-w-[28%] truncate text-center${isOwner ? ' cursor-pointer' : ''}"
                 ${isOwner ? 'onclick="renameList(this)" title="Rename list"' : ''}>${esc(d.list.name)}</h1>
             <div class="flex items-center shrink-0">
+              <!-- Undo / redo. Always present so the affordance is discoverable,
+                   dimmed and disabled while the matching stack is empty
+                   (syncUndoChrome keeps them honest between repaints). -->
+              <button id="undo-btn" onclick="doUndo()" title="Undo (⌘Z)" aria-label="Undo"
+                      class="tinted px-1 py-2.5" style="opacity: .3" aria-disabled="true" disabled>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="block"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>
+              </button>
+              <button id="redo-btn" onclick="doRedo()" title="Redo (⇧⌘Z)" aria-label="Redo"
+                      class="tinted px-1 py-2.5" style="opacity: .3" aria-disabled="true" disabled>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="block"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h3"/></svg>
+              </button>
               ${d.members.length === 0 ? `
               <button onclick="openMembers()" title="Private — only you can see this list. Tap to invite." aria-label="Private — only you can see this list. Tap to invite."
                       class="needs-net tinted px-2.5 py-2.5">${lockSvg(16)}</button>` : `
@@ -1651,6 +1953,7 @@
         </form>
       `;
       wireNative();
+      syncUndoChrome();
     }
 
     // --- ☰ menu: anchored dropdown on desktop, kit bottom sheet on touch --------
@@ -1746,7 +2049,13 @@
             </form>` : ''}
             <div class="active-items${unchecked.length || empty ? '' : ' hidden'}">
               ${unchecked.map(renderItem).join('')}
-              ${empty ? '<p class="empty-note un-group-row text-[13px] px-4 py-2.5" style="color: var(--label2)">No items yet</p>' : ''}
+              ${empty ? `
+              <button type="button" onclick="emptyNoteTap(${c.id})" title="Add the first item"
+                      class="empty-note un-group-row un-pressable un-touch-target w-full flex items-center gap-2.5 px-4 py-2.5 text-[13px] text-left cursor-pointer"
+                      style="color: var(--label2)">
+                <span class="tinted text-[18px] leading-none select-none" aria-hidden="true">+</span>
+                <span>No items yet</span>
+              </button>` : ''}
             </div>
             ${checked.length ? `
             ${(fullyDone && !isBucket) || searching ? '' : `
@@ -1786,17 +2095,29 @@
       // hasn't reached the server. A quiet marker says so, and only after the
       // change has been unsent long enough to be worth mentioning.
       const pending = pendingShown && pendingItemIds().has(i.id);
+      const dates = datesOn();
+      const overdue = dates && isOverdue(i);
       return `
         <div class="un-group-row un-pressable item-row group flex items-center gap-2.5 px-4 py-2.5 cursor-pointer"
              data-item="${i.id}" data-cat="${i.category_id}" data-checked="${i.checked ? 1 : 0}"${pending ? ' data-pending="1"' : ''}
              onclick="rowTap(event, this)">
-          ${searchActive() ? '' : `<span class="drag-handle item-drag select-none text-sm shrink-0" style="color: var(--label3)" title="Drag to reorder">⠿</span>`}
+          ${searchActive() ? '' : (dates
+            ? `<span class="drag-handle select-none text-sm shrink-0" style="color: var(--label3)" title="Sorted by due date" onclick="dateSortHint()">⠿</span>`
+            : `<span class="drag-handle item-drag select-none text-sm shrink-0" style="color: var(--label3)" title="Drag to reorder">⠿</span>`)}
           <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(rowId(this), this.checked)"
                  class="todo-check">
           <span class="flex-1 text-[16px] break-words ${i.checked ? 'line-through' : ''}"${i.checked ? ' style="color: var(--label2)"' : ''}>${esc(i.text)}</span>
           ${pending ? `<span class="pending-dot shrink-0 text-[15px] leading-none" data-pending-dot
                  title="Waiting to sync" aria-label="Waiting to sync">⋯</span>` : ''}
           ${i.last_checked_by ? `<span class="shrink-0 text-[11px]" style="color: var(--label3)" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
+          ${dates ? (i.due_date ? `
+          <button onclick="openDueEditor(rowId(this))" title="Change due date"
+                  class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
+                  style="background: var(--fill); color: var(--${overdue ? 'danger' : 'label2'})"
+                  data-due="${esc(i.due_date)}"${overdue ? ' data-overdue="1"' : ''}>${esc(dueLabel(i))}</button>` : `
+          <button onclick="openDueEditor(rowId(this))" title="Add a due date" aria-label="Add a due date"
+                  class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
+                  style="color: var(--label3); border: 1px dashed var(--separator)">+ date</button>`) : ''}
           <button onclick="editItem(rowId(this))" title="Edit"
                   class="hover-action opacity-0 group-hover:opacity-100 text-xs px-1" style="color: var(--label2)">✎</button>
           <button onclick="deleteItem(rowId(this))" title="Delete"
@@ -1882,7 +2203,9 @@
       if (reorderItemsHandle) { reorderItemsHandle.detach(); reorderItemsHandle = null; }
       if (reorderCatsHandle) { reorderCatsHandle.detach(); reorderCatsHandle = null; }
       const cats = document.getElementById('cats');
-      if (cats && !searchActive() && isOnline()) {
+      // Item drag is also off while the list sorts by due date: manual order
+      // isn't what's on screen, so dragging a row could only lie about it.
+      if (cats && !searchActive() && isOnline() && !datesOn()) {
         reorderItemsHandle = unNative.attachReorder(cats, {
           // Rows are wrapped in .un-swipe by attachSwipeActions; the
           // .empty-note placeholder makes empty categories valid drop
@@ -1890,6 +2213,10 @@
           itemSelector: '.un-swipe:has(.item-row), .item-row.un-swipe, .empty-note',
           handle: '.item-drag',
           onReorder: (from, to, el) => onItemReorder(el),
+          // The repaint waits for the kit's drop spring to finish (issue #43):
+          // swapping the markup out mid-flight is what made the released row
+          // snap into place instead of landing.
+          onSettle: settleItemReorder,
         });
         reorderCatsHandle = unNative.attachReorder(cats, {
           itemSelector: '.cat-section',
@@ -1899,12 +2226,76 @@
       }
     }
 
+    // --- reorder drop animation (issue #43) ------------------------------------
+    // The kit only FLIPs siblings in grid mode; in list mode the rows around the
+    // dragged one jump. On top of that the repaint below used to run inside
+    // onReorder — i.e. while the kit's drop spring was still animating the
+    // released row — so the row it was animating got replaced and the drop read
+    // as a snap. Two halves to the fix: the repaint now waits for onSettle, and
+    // it runs inside a FLIP pass so every row that changed place slides there.
+    //
+    // Transforms only (never top/height), so nothing here can reflow the list.
+    const FLIP_MS = 200;
+    const FLIP_EASE = 'cubic-bezier(.22,.61,.36,1)';
+
+    function prefersReducedMotion() {
+      return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
+    function flipRows(mutate) {
+      const cats = document.getElementById('cats');
+      if (!cats || prefersReducedMotion() || typeof Element.prototype.animate !== 'function') {
+        mutate();
+        return;
+      }
+      const before = new Map();
+      cats.querySelectorAll('.item-row').forEach(r => {
+        before.set(r.dataset.item, r.getBoundingClientRect().top);
+      });
+      mutate();
+      const moved = [];
+      document.querySelectorAll('#cats .item-row').forEach(r => {
+        const prev = before.get(r.dataset.item);
+        if (prev == null) return;
+        const dy = prev - r.getBoundingClientRect().top;
+        if (Math.abs(dy) < 1) return; // unmoved: no animation, no compositor work
+        moved.push([r, dy]);
+      });
+      moved.forEach(([r, dy]) => {
+        try {
+          r.animate(
+            [{ transform: 'translateY(' + dy + 'px)' }, { transform: 'translateY(0)' }],
+            { duration: FLIP_MS, easing: FLIP_EASE }
+          );
+        } catch (_) { /* animation is decoration; the layout is already right */ }
+      });
+    }
+
+    // Set by onItemReorder, run when the kit says the drop has settled. The
+    // timer is a backstop: if the kit in use predates onSettle the repaint
+    // still happens, just without waiting for a spring that never reports.
+    let pendingReorderRepaint = null, reorderSettleTimer = null;
+
+    function scheduleReorderRepaint(fn) {
+      pendingReorderRepaint = fn;
+      clearTimeout(reorderSettleTimer);
+      reorderSettleTimer = setTimeout(settleItemReorder, 500);
+    }
+
+    function settleItemReorder() {
+      clearTimeout(reorderSettleTimer);
+      reorderSettleTimer = null;
+      const fn = pendingReorderRepaint;
+      pendingReorderRepaint = null;
+      if (fn) flipRows(fn);
+    }
+
     // The kit has already moved the element in the DOM; derive the new order
     // from where it landed, update local state, persist, and repaint the
     // affected sections to normalize the markup.
     function onItemReorder(el) {
       if (!current) return;
-      if (el.classList.contains('empty-note')) { repaintAllCategories(); return; }
+      if (el.classList.contains('empty-note')) { scheduleReorderRepaint(repaintAllCategories); return; }
       const row = el.classList.contains('item-row') ? el : el.querySelector('.item-row');
       const sec = el.closest('.cat-section');
       if (!row || !sec) { refreshList(); return; }
@@ -1918,7 +2309,7 @@
       // empty category accepts either state. Anything else is undone.
       const otherRows = Array.from(sec.querySelectorAll('.item-row')).filter(r => +r.dataset.item !== id);
       const landedInDone = !!el.closest('.done-items');
-      if (otherRows.length && landedInDone !== checked) { repaintAllCategories(); return; }
+      if (otherRows.length && landedInDone !== checked) { scheduleReorderRepaint(repaintAllCategories); return; }
       // New order = visible DOM order of this section's matching rows.
       const ids = Array.from(sec.querySelectorAll('.item-row'))
         .filter(r => (r.dataset.checked === '1') === checked)
@@ -1928,7 +2319,8 @@
         const it = current.items.find(x => x.id === iid);
         if (it) it.sort_order = idx + 1;
       });
-      (fromCat === toCat ? [toCat] : [fromCat, toCat]).forEach(repaintCategory);
+      const touched = fromCat === toCat ? [toCat] : [fromCat, toCat];
+      scheduleReorderRepaint(() => touched.forEach(repaintCategory));
       // An item whose create hasn't reached the server has no id to reorder by
       // yet. Keep the local move and let the refetch after the drain settle it,
       // rather than sending a temp id the server can't match.
@@ -2146,6 +2538,130 @@
       });
     }
 
+    // --- undo / redo (issue #45) -----------------------------------------------
+    // Covers the everyday item mutations — add, delete, rename, tick/untick and
+    // (with due dates on) the due date itself. Session- and list-scoped: opening
+    // another list or Home clears the stacks, because an undo reaching back into
+    // a screen the user has left is a surprise, not a convenience.
+    //
+    // Entries are plain data rather than closures, because ids move: an add's
+    // temp id becomes the server's id when its create lands, and every entry
+    // holding that id has to follow (remapHistoryId, called from
+    // adoptServerItem). Each step replays through the ordinary mutator, so undo
+    // is queued, offline-safe and coalesced exactly like the action it reverses.
+    const HISTORY_MAX = 50;
+    let undoStack = [], redoStack = [], historyBusy = false;
+
+    function clearHistory() {
+      undoStack = [];
+      redoStack = [];
+      syncUndoChrome();
+    }
+
+    function record(entry) {
+      if (historyBusy) return; // undo/redo move the entry themselves
+      undoStack.push(entry);
+      if (undoStack.length > HISTORY_MAX) undoStack.shift();
+      redoStack = []; // a fresh action forks the timeline
+      syncUndoChrome();
+    }
+
+    function remapHistoryId(oldId, newId) {
+      if (oldId === newId) return;
+      undoStack.concat(redoStack).forEach(e => { if (e.itemId === oldId) e.itemId = newId; });
+    }
+
+    // Runs one entry in one direction. Synchronous on purpose: every mutator it
+    // calls applies locally and queues, so nothing here can interleave with a
+    // network reply that renumbers the row mid-step.
+    function runHistory(entry, dir) {
+      const found = () => current && current.items.find(i => i.id === entry.itemId);
+      historyBusy = true;
+      try {
+        if (entry.kind === 'add' || entry.kind === 'delete') {
+          // Undoing an add is a delete; undoing a delete is a create. (The
+          // server row is gone for good, so the restored item is a new row that
+          // inherits the old one's text, category, tick and due date.)
+          const removing = (entry.kind === 'add') === (dir === 'undo');
+          if (removing) {
+            if (!found()) return false;
+            deleteItem(entry.itemId);
+            return true;
+          }
+          const newId = restoreItem(entry.snapshot);
+          if (newId == null) return false;
+          remapHistoryId(entry.itemId, newId);
+          entry.itemId = newId;
+          return true;
+        }
+        if (!found()) return false;
+        const v = dir === 'undo' ? entry.before : entry.after;
+        if (entry.kind === 'edit') return applyEditText(entry.itemId, v.text);
+        if (entry.kind === 'toggle') { toggleItem(entry.itemId, v.checked); return true; }
+        if (entry.kind === 'due') return applyDue(entry.itemId, v.due_date, v.due_time);
+        return false;
+      } finally {
+        historyBusy = false;
+      }
+    }
+
+    function doUndo() {
+      if (!current || !undoStack.length) return;
+      const entry = undoStack.pop();
+      if (!runHistory(entry, 'undo')) {
+        // The row it points at is gone (deleted by another member, or dropped
+        // by a rejected op). Discard the entry rather than pretending.
+        syncUndoChrome();
+        toast("Can't undo that — the item is gone");
+        return;
+      }
+      redoStack.push(entry);
+      if (redoStack.length > HISTORY_MAX) redoStack.shift();
+      syncUndoChrome();
+      toast('Undone');
+    }
+
+    function doRedo() {
+      if (!current || !redoStack.length) return;
+      const entry = redoStack.pop();
+      if (!runHistory(entry, 'redo')) {
+        syncUndoChrome();
+        toast("Can't redo that — the item is gone");
+        return;
+      }
+      undoStack.push(entry);
+      if (undoStack.length > HISTORY_MAX) undoStack.shift();
+      syncUndoChrome();
+      toast('Redone');
+    }
+
+    // Header buttons live outside #cats, so they need their own sync pass after
+    // anything that changes the stacks (same shape as syncSearchChrome).
+    function syncUndoChrome() {
+      setHistoryBtn(document.getElementById('undo-btn'), undoStack.length > 0);
+      setHistoryBtn(document.getElementById('redo-btn'), redoStack.length > 0);
+    }
+    function setHistoryBtn(btn, enabled) {
+      if (!btn) return;
+      btn.disabled = !enabled;
+      btn.style.opacity = enabled ? '1' : '.3';
+      btn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    }
+
+    // ⌘Z / Ctrl+Z, and ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y to redo. Never while a text
+    // field has focus: there, the platform's own text undo is the right one.
+    document.addEventListener('keydown', ev => {
+      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return;
+      const k = (ev.key || '').toLowerCase();
+      if (k !== 'z' && k !== 'y') return;
+      const t = ev.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!current) return;
+      ev.preventDefault();
+      if (k === 'y' || ev.shiftKey) doRedo();
+      else doUndo();
+    });
+
     // --- item actions ---------------------------------------------------------------
     // The four daily-use actions never await the network. Each one records the
     // change in the queue (a synchronous localStorage write), applies it to the
@@ -2172,7 +2688,9 @@
         input.value = text;
         return false;
       }
-      current.items.push(localNewItem(tempId, bucket.id, text));
+      const item = localNewItem(tempId, bucket.id, text);
+      current.items.push(item);
+      record({ kind: 'add', itemId: tempId, snapshot: { ...item } });
       cacheList();
       repaintAllCategories();
       return false;
@@ -2193,6 +2711,7 @@
       }
       const item = localNewItem(tempId, categoryId, text);
       current.items.push(item); // smallest sort_order → top of the active list
+      record({ kind: 'add', itemId: tempId, snapshot: { ...item } });
       cacheList();
       if (wasFullyDone) {
         // The section was rendered compact (inline done toggle, tight
@@ -2232,6 +2751,7 @@
       item.completed_at = checked ? new Date().toISOString() : null;
       item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
       item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
+      record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
       // Keep a newly fully-done category expanded only if its done items
       // were already visible, so the rows the user is looking at don't
@@ -2245,14 +2765,24 @@
       const existing = current.items.find(i => i.id === id);
       const text = await askText('Edit item:', existing ? existing.text : '');
       if (!text || !text.trim()) return;
+      applyEditText(id, text.trim());
+    }
+
+    // The prompt-free half of editItem, so undo/redo can set a known text
+    // without asking the user to retype it.
+    function applyEditText(id, text) {
       const idx = current.items.findIndex(i => i.id === id);
-      if (idx === -1) return; // deleted while the prompt was open
+      if (idx === -1) return false; // deleted while the prompt was open
+      const before = current.items[idx].text;
+      if (before === text) return true;
       if (!commit({ type: 'edit', itemId: id, method: 'PATCH',
-                    path: '/api/items/' + id, body: { text: text.trim() },
-                    undo: { text: current.items[idx].text } })) return;
-      current.items[idx] = { ...current.items[idx], text: text.trim() };
+                    path: '/api/items/' + id, body: { text },
+                    undo: { text: before } })) return false;
+      current.items[idx] = { ...current.items[idx], text };
+      record({ kind: 'edit', itemId: id, before: { text: before }, after: { text } });
       cacheList();
       repaintCategory(current.items[idx].category_id);
+      return true;
     }
 
     function deleteItem(id) {
@@ -2269,8 +2799,31 @@
         return;
       }
       current.items = current.items.filter(i => i.id !== id);
+      record({ kind: 'delete', itemId: id, snapshot: { ...item } });
       cacheList();
       repaintCategory(item.category_id);
+    }
+
+    // Undo of a delete. The server row is gone, so this is a fresh create that
+    // inherits the old row's text, category, tick and due date — each as its own
+    // queued op, so the create ahead of them hands over its real id on the way
+    // through (see runOp).
+    function restoreItem(snap) {
+      if (!current || !snap) return null;
+      const cat = current.categories.find(c => c.id === snap.category_id)
+        || current.categories.find(c => c.is_default) || current.categories[0];
+      if (!cat) { toast('That item\'s category is gone'); return null; }
+      const tempId = tempSeq--;
+      if (!commit({ type: 'add', itemId: tempId, method: 'POST',
+                    path: '/api/categories/' + cat.id + '/items',
+                    body: { text: snap.text } })) return null;
+      const item = localNewItem(tempId, cat.id, snap.text);
+      current.items.push(item);
+      cacheList();
+      repaintCategory(cat.id);
+      if (snap.checked) toggleItem(tempId, true);
+      if (snap.due_date) applyDue(tempId, snap.due_date, snap.due_time || null);
+      return tempId;
     }
 
     // --- markdown import / export ------------------------------------------------
