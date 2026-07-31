@@ -14,7 +14,7 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-const CACHE_VERSION = 'todo-v1';
+const CACHE_VERSION = 'todo-v2';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 

@@ -192,7 +192,7 @@ app.get('/api/lists', async (req, res) => {
   try {
     if (IS_STAGING) await seedDemoListFor(req.user);
     const { rows } = await pool.query(
-      `SELECT l.id, l.name, l.owner_id, l.owner_username, l.created_at,
+      `SELECT l.id, l.name, l.owner_id, l.owner_username, l.created_at, l.due_dates_enabled,
               (l.owner_id = $1) AS is_owner,
               (SELECT COUNT(*) FROM list_members m WHERE m.list_id = l.id) AS member_count,
               (SELECT COUNT(*) FROM items i JOIN categories c ON i.category_id = c.id
@@ -261,7 +261,12 @@ app.get('/api/lists/:id', async (req, res) => {
     const [cats, items, members] = await Promise.all([
       pool.query(`SELECT id, name, is_default, sort_order FROM categories
                    WHERE list_id = $1 ORDER BY sort_order, id`, [list.id]),
-      pool.query(`SELECT i.id, i.category_id, i.text, i.checked, i.sort_order, i.completed_at, i.created_by, i.last_checked_by
+      // due_date/due_time go over the wire as plain strings via to_char: pg
+      // would otherwise hand back a JS Date at the *server's* midnight, which
+      // the client then re-interprets in its own zone and shifts by a day.
+      pool.query(`SELECT i.id, i.category_id, i.text, i.checked, i.sort_order, i.completed_at, i.created_by, i.last_checked_by,
+                         to_char(i.due_date, 'YYYY-MM-DD') AS due_date,
+                         to_char(i.due_time, 'HH24:MI') AS due_time
                     FROM items i JOIN categories c ON i.category_id = c.id
                    WHERE c.list_id = $1
                    ORDER BY i.checked, i.sort_order, i.id`, [list.id]),
@@ -270,7 +275,10 @@ app.get('/api/lists/:id', async (req, res) => {
     ]);
 
     res.json({
-      list: { id: list.id, name: list.name, owner_id: list.owner_id, owner_username: list.owner_username },
+      list: {
+        id: list.id, name: list.name, owner_id: list.owner_id, owner_username: list.owner_username,
+        due_dates_enabled: !!list.due_dates_enabled,
+      },
       role,
       categories: cats.rows,
       items: items.rows,
@@ -281,15 +289,29 @@ app.get('/api/lists/:id', async (req, res) => {
   }
 });
 
-// Rename a list (owner only).
+// Rename a list and/or flip its due-dates setting (owner only). Both fields
+// are optional, so a settings-only PATCH doesn't have to resend the name.
 app.patch('/api/lists/:id', async (req, res) => {
   try {
     const { list, role } = await getListRole(req.params.id, req.user);
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
-    if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can rename the list' });
-    const name = (req.body.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'List name is required' });
-    await pool.query(`UPDATE lists SET name = $1 WHERE id = $2`, [name, list.id]);
+    if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can change list settings' });
+
+    const wantsName = req.body.name !== undefined;
+    const wantsDates = typeof req.body.due_dates_enabled === 'boolean';
+    if (!wantsName && !wantsDates) return res.status(400).json({ error: 'Nothing to update' });
+
+    if (wantsName) {
+      const name = (req.body.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'List name is required' });
+      await pool.query(`UPDATE lists SET name = $1 WHERE id = $2`, [name, list.id]);
+    }
+    if (wantsDates) {
+      await pool.query(`UPDATE lists SET due_dates_enabled = $1 WHERE id = $2`,
+        [req.body.due_dates_enabled, list.id]);
+      // Turning the setting off keeps the dates on disk: flipping it back on
+      // restores what was there rather than silently destroying data.
+    }
     notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
@@ -734,7 +756,33 @@ app.patch('/api/items/:id', async (req, res) => {
       );
     }
 
-    const { rows } = await pool.query(`SELECT * FROM items WHERE id = $1`, [item.id]);
+    // Due date/time. Both accept null to clear. Validated against strict
+    // wall-clock shapes so a malformed value can't reach pg as a cast error,
+    // and clearing the date clears the time with it (a bare time is not a
+    // thing this app can render or sort).
+    if (req.body.due_date !== undefined) {
+      const d = req.body.due_date;
+      if (d !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(d))) {
+        return res.status(400).json({ error: 'due_date must be YYYY-MM-DD or null' });
+      }
+      await pool.query(`UPDATE items SET due_date = $1::date WHERE id = $2`, [d, item.id]);
+      if (d === null) await pool.query(`UPDATE items SET due_time = NULL WHERE id = $1`, [item.id]);
+    }
+    if (req.body.due_time !== undefined) {
+      const t = req.body.due_time;
+      if (t !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t))) {
+        return res.status(400).json({ error: 'due_time must be HH:MM or null' });
+      }
+      await pool.query(
+        `UPDATE items SET due_time = CASE WHEN due_date IS NULL THEN NULL ELSE $1::time END
+          WHERE id = $2`, [t, item.id]);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, category_id, text, checked, sort_order, completed_at, created_by, last_checked_by,
+              to_char(due_date, 'YYYY-MM-DD') AS due_date,
+              to_char(due_time, 'HH24:MI') AS due_time
+         FROM items WHERE id = $1`, [item.id]);
     notify(list.id, req);
     res.json({ item: rows[0] });
   } catch (err) {
@@ -812,6 +860,13 @@ async function seedDemoListFor(user) {
       `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Groceries', FALSE, 1) RETURNING id`,
       [list.id]
     )).rows[0];
+    // Deliberately left with no items: the "No items yet" row is now the
+    // primary way to add to an empty category, so staging needs one empty
+    // category to exercise it.
+    await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Packing', FALSE, 2)`,
+      [list.id]
+    );
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
          ($1, 'Plan Saturday hike', FALSE, 1, NULL, $3),
@@ -844,6 +899,27 @@ async function seedDemoListFor(user) {
       `INSERT INTO list_members (list_id, username) VALUES ($1, 'staging-demo-user')`,
       [shared.id]
     );
+    // A third list with due dates switched ON, so the dated presentation
+    // (chips, "Today"/"Tomorrow", the overdue row) has data in staging.
+    // Dates are relative to CURRENT_DATE so the seed never goes stale.
+    const dated = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username, due_dates_enabled)
+       VALUES ($1, $2, $3, TRUE) RETURNING id`,
+      ['Demo: Due Dates', user.id, user.username]
+    )).rows[0];
+    const datedGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [dated.id]
+    )).rows[0];
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, due_date, due_time) VALUES
+         ($1, 'Renew library books', FALSE, 1, NULL, $2, CURRENT_DATE - 2, '17:00'),
+         ($1, 'Call the dentist', FALSE, 2, NULL, $2, CURRENT_DATE, '09:30'),
+         ($1, 'Water the plants', FALSE, 3, NULL, $2, CURRENT_DATE + 1, NULL),
+         ($1, 'Submit expense report', FALSE, 4, NULL, $2, CURRENT_DATE + 6, '12:00'),
+         ($1, 'Someday: learn to sail', FALSE, 5, NULL, $2, NULL, NULL)`,
+      [datedGeneral.id, user.username]
+    );
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -866,6 +942,9 @@ async function start() {
       owner_username VARCHAR(255) NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    -- Per-list opt-in for due dates. Defaults FALSE so every existing list —
+    -- and every new one — stays exactly as dateless as it was before.
+    ALTER TABLE lists ADD COLUMN IF NOT EXISTS due_dates_enabled BOOLEAN NOT NULL DEFAULT FALSE;
     COMMENT ON TABLE lists IS 'staging:private';
 
     CREATE TABLE IF NOT EXISTS list_members (
@@ -906,8 +985,15 @@ async function start() {
     -- the same item twice. Nullable: rows created before this column, seeded
     -- rows, and imports all keep NULL, which the partial index ignores.
     ALTER TABLE items ADD COLUMN IF NOT EXISTS client_op_id VARCHAR(64);
+    -- Due date/time as wall-clock values, deliberately NOT timestamptz: "the
+    -- 3rd at 9am" is what the user typed and must read back identically in
+    -- every timezone. due_time is meaningless without due_date, so clearing
+    -- the date clears the time (enforced in PATCH /api/items/:id).
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS due_date DATE;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS due_time TIME;
     COMMENT ON TABLE items IS 'staging:private';
     CREATE INDEX IF NOT EXISTS items_category_idx ON items (category_id);
+    CREATE INDEX IF NOT EXISTS items_due_idx ON items (due_date) WHERE due_date IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS items_client_op_id_key
       ON items (client_op_id) WHERE client_op_id IS NOT NULL;
 
