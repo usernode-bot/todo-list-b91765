@@ -14,7 +14,7 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-const CACHE_VERSION = 'todo-v2';
+const CACHE_VERSION = 'todo-v3';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -25,6 +25,14 @@ const ASSET_CACHE = CACHE_VERSION + '-assets';
 // would poison the shell entry.
 const SHELL_URL = '/index.html';
 const PRECACHE = [SHELL_URL, '/theme.css', '/favicon.svg'];
+
+// The ONLY same-origin paths this worker is allowed to serve from cache. It
+// used to be "everything that isn't /api/*", which quietly enrolled every path
+// the app might grow later — including platform-polled ones like
+// /explorer-api/*, which is unauthenticated by convention and must never be
+// answered from a stale cache. An allowlist can't acquire new members by
+// accident; anything not named here goes straight to the network.
+const CACHEABLE_PATHS = new Set([SHELL_URL, '/theme.css', '/favicon.svg', '/landing.html']);
 
 // Cross-origin hosts whose assets are worth keeping for an offline load. Kept
 // deliberately tight: opaque cross-origin entries are padded heavily against
@@ -136,9 +144,9 @@ self.addEventListener('fetch', event => {
   }
 
   if (sameOrigin) {
-    // Never cache the worker itself; everything else same-origin and static
-    // (theme.css, favicon, the shell) is fine to serve from cache first.
-    if (url.pathname === '/sw.js') return;
+    // Explicit allowlist — see CACHEABLE_PATHS. /sw.js is deliberately absent
+    // (a worker that caches itself can never be replaced).
+    if (!CACHEABLE_PATHS.has(url.pathname)) return;
     event.respondWith(staleWhileRevalidate(SHELL_CACHE, req).catch(() => fetch(req)));
     return;
   }
