@@ -867,15 +867,34 @@ async function seedDemoListFor(user) {
       `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Packing', FALSE, 2)`,
       [list.id]
     );
+    // A category with items and NOTHING ticked. This is the case the old
+    // header chevron couldn't do anything with (it only hid completed items),
+    // so it is the primary state the whole-category collapse has to exercise.
+    const errands = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Errands', FALSE, 3) RETURNING id`,
+      [list.id]
+    )).rows[0];
+    // A deliberately long name, so the header's truncation can be checked
+    // against the grip and chevron after the alignment fix.
+    const longCat = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order)
+       VALUES ($1, 'Things to sort out before the trip', FALSE, 4) RETURNING id`,
+      [list.id]
+    )).rows[0];
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
-         ($1, 'Plan Saturday hike', FALSE, 1, NULL, $3),
-         ($1, 'Book dinner reservation', FALSE, 2, NULL, $3),
-         ($1, 'Charge camera batteries', TRUE, 1, NOW(), $3),
-         ($2, 'Trail mix', FALSE, 1, NULL, $3),
-         ($2, 'Sparkling water', FALSE, 2, NULL, $3),
-         ($2, 'Sunscreen', TRUE, 1, NOW(), $3)`,
-      [general.id, groceries.id, user.username]
+         ($1, 'Plan Saturday hike', FALSE, 1, NULL, $5),
+         ($1, 'Book dinner reservation', FALSE, 2, NULL, $5),
+         ($1, 'Charge camera batteries', TRUE, 1, NOW(), $5),
+         ($2, 'Trail mix', FALSE, 1, NULL, $5),
+         ($2, 'Sparkling water', FALSE, 2, NULL, $5),
+         ($2, 'Sunscreen', TRUE, 1, NOW(), $5),
+         ($3, 'Return the library book', FALSE, 1, NULL, $5),
+         ($3, 'Pick up the parcel', FALSE, 2, NULL, $5),
+         ($3, 'Top up the travel card', FALSE, 3, NULL, $5),
+         ($4, 'Check the tyre pressures', FALSE, 1, NULL, $5),
+         ($4, 'Find the spare house key', FALSE, 2, NULL, $5)`,
+      [general.id, groceries.id, errands.id, longCat.id, user.username]
     );
     // A second, shared list so the owner-inclusive member count is visible
     // on Home ("2 members" = the tester + staging-demo-user).

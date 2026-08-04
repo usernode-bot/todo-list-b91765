@@ -151,12 +151,51 @@
     body.is-offline .item-drag,
     body.is-offline .cat-drag { opacity: .35; }
 
-    .pencil-host .pencil { opacity: 0; transition: opacity .12s; }
-    .pencil-host:hover .pencil { opacity: 1; }
-    .cat-head .cat-del { opacity: 0; transition: opacity .12s; }
-    .cat-head:hover .cat-del { opacity: 1; }
-    .drag-handle { cursor: grab; touch-action: none; }
+    .cat-head .cat-del,
+    .cat-head .cat-rename { opacity: 0; transition: opacity .12s; }
+    .cat-head:hover .cat-del,
+    .cat-head:hover .cat-rename { opacity: 1; }
+    .drag-handle {
+      cursor: grab; touch-action: none;
+      /* Wins the ~11px of overlap with the checkbox's 44px hit overlay to its
+         right, so starting an item drag stays easy on touch. */
+      position: relative; z-index: 1;
+    }
     .drag-handle:active { cursor: grabbing; }
+
+    /* ── Todo row checkbox: 22px circle, 44px target (issue #48) ──────────
+       The circle is the ONLY thing that ticks an item now, so its hit area
+       has to be comfortably bigger than it looks. Overlay pseudo-element,
+       centred on the circle, adding no layout of its own. */
+    .check-hit { position: relative; display: flex; align-items: center; flex: none; }
+    .check-hit::after {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      width: 44px; height: 44px; transform: translate(-50%, -50%);
+    }
+
+    /* ── Category header alignment (issue #48) ────────────────────────────
+       The kit's .un-group-header carries `padding: 0 16px 7px`. In .cat-head —
+       a flex row that centres its children — that bottom padding makes the
+       h2's BOX taller below its text, so centring the box left the text
+       sitting ~3.5px high of the grip and chevron, and the 16px side padding
+       pushed the name right of the item text below it. Scoped to .cat-head on
+       purpose: landing.html uses .un-group-header alone in its own row and
+       depends on the kit's padding to line up with the card's px-4 rows. */
+    .cat-head .un-group-header { padding: 0; line-height: 1.2; }
+    /* Centre by BOX, not by glyph metrics — ⠿ and › sit at different heights
+       in their em boxes, so equal fixed boxes are what actually aligns them. */
+    .cat-head .cat-drag,
+    .cat-head .chev {
+      display: flex; align-items: center; justify-content: center;
+      width: 20px; height: 20px; line-height: 1; padding: 0; flex: none;
+    }
+    .cat-head .cat-drag { font-size: 14px; }
+    .cat-head .chev { font-size: 17px; transition: transform .18s ease; }
+    /* One rotating chevron rather than a swapped ▶/▼ pair: two glyphs have two
+       optical centres, which is half of why the row looked like it jumped. */
+    .cat-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+    .cat-toggle { min-height: 30px; text-align: left; }
+    @media (prefers-reduced-motion: reduce) { .cat-head .chev { transition: none; } }
 
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
@@ -176,7 +215,7 @@
        drag handle for the kit's reorder (handles lift immediately on both
        inputs). */
     @media (hover: none) and (pointer: coarse) {
-      .item-drag, .hover-action, .cat-del { display: none !important; }
+      .item-drag, .hover-action, .cat-del, .cat-rename { display: none !important; }
     }
 
     /* ── Modals on a narrow screen ────────────────────────────────────────
@@ -275,6 +314,14 @@
     const shotUndo = shot === 'undo';
     const shotDue = shot === 'due';
     const shotDueEditor = shot === 'dueeditor';
+    // Screenshot/test deep links for the states this change introduces: a
+    // collapsed category (?shot=collapsed), the Offline & storage read-out
+    // (?shot=diag) and the honest strip copy a device that refuses offline
+    // storage gets (?shot=nostore). All three live behind a tap or a device
+    // condition no navigation can reach. Display-only, in every environment.
+    const shotCollapsed = shot === 'collapsed';
+    const shotDiag = shot === 'diag';
+    const shotNostore = shot === 'nostore';
 
     // Deadlines. Every request gets one: without them a stalled TCP connection
     // hangs the promise for as long as the browser's own timeout (often
@@ -299,11 +346,44 @@
         return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       } catch (_) { return null; }
     })();
-    const me = (jwt && jwt.username) || null;
+
+    // --- who we are, when the platform didn't tell us (issue #47) ---------------
+    // The shell stamps `?token=` on the iframe's first load. A load WITHOUT one
+    // is not hypothetical: it is exactly the offline cold start the service
+    // worker exists to serve, and it used to be catastrophic — no token meant
+    // NS fell back to 'todo:uanon:', and the cross-namespace sweep below then
+    // deleted the real user's saved lists AND their unsent mutation queue.
+    //
+    // So: remember the IDENTITY (never the token — a bearer credential at rest
+    // buys nothing here, the server trusts no client claim) from every load
+    // that had one, and fall back to it when this load doesn't. The requests
+    // still go out unauthenticated, get a 401, and park the queue in the
+    // 'blocked' state until a normal load mints a fresh token — which is the
+    // correct end state, and loses nothing.
+    const LAST_USER_KEY = 'todo:last-user';
+    function readLastUser() {
+      try {
+        const v = JSON.parse(localStorage.getItem(LAST_USER_KEY));
+        return v && v.id != null ? v : null;
+      } catch (_) { return null; }
+    }
+    function writeLastUser(u) {
+      try { localStorage.setItem(LAST_USER_KEY, JSON.stringify({ id: u.id, username: u.username })); }
+      catch (_) { /* storage unavailable — see STORAGE_MODE below */ }
+    }
+    // True only when THIS load carried a verifiable-shaped token. Everything
+    // destructive (the cross-namespace sweep) is gated on it.
+    const HAVE_TOKEN_IDENTITY = !!(jwt && jwt.id != null);
+    const identity = HAVE_TOKEN_IDENTITY
+      ? { id: jwt.id, username: jwt.username }
+      : readLastUser();
+    if (HAVE_TOKEN_IDENTITY) writeLastUser(identity);
+
+    const me = (identity && identity.username) || null;
     // Every cached payload and every queued op is namespaced by user id, so a
     // second account on the same browser can neither see the first one's saved
     // lists nor replay its pending changes with the wrong token.
-    const NS = 'todo:u' + (jwt && jwt.id != null ? String(jwt.id) : 'anon') + ':';
+    const NS = 'todo:u' + (identity && identity.id != null ? String(identity.id) : 'anon') + ':';
 
     // Every request is abortable and every request has a deadline. `timeoutMs`
     // is per-call because the right deadline differs by kind of work: a read we
@@ -350,6 +430,9 @@
         err.status = res.status;
         throw err;
       }
+      // Any call that came back is a successful round trip to the server —
+      // which is exactly what the Offline & storage read-out means by it.
+      lastSyncAt = Date.now();
       // A successful call proves we're back — but never fight the replay loop
       // for the strip while it is mid-drain.
       if ((connState === 'offline' || connState === 'slow') && !replaying && !queueLength()) markOnline();
@@ -377,9 +460,55 @@
     const listKey = id => NS + 'cache:list:' + id;
     const MAX_CACHED_LISTS = 10;
 
+    // --- storage mode (issue #47) ----------------------------------------------
+    // Every cache write used to be a silent try/catch, so a device that refuses
+    // the app durable storage — the realistic case being this cross-origin
+    // iframe under iOS/WKWebView's third-party storage rules — got NO saved
+    // copy and NO durable queue, while the status strip went right on promising
+    // "showing saved copy" and "3 changes will sync". Probe once, then be
+    // honest about which of the two worlds we are in.
+    //
+    // 'disk'   — localStorage works; everything persists across a cold start.
+    // 'memory' — it doesn't; back the same interface with a Map so the session
+    //            still works end to end, and change what the strip claims.
+    const memStore = new Map();
+    const STORAGE_MODE = (function probeStorage() {
+      if (shotNostore) return 'memory'; // display-only screenshot state
+      try {
+        const probe = 'todo:__probe';
+        localStorage.setItem(probe, '1');
+        const ok = localStorage.getItem(probe) === '1';
+        localStorage.removeItem(probe);
+        return ok ? 'disk' : 'memory';
+      } catch (_) { return 'memory'; }
+    })();
+    const DURABLE = STORAGE_MODE === 'disk';
+
+    // The two primitives everything else in the offline layer is built on.
+    // Neither ever throws; `cacheSet` returning false is the caller's signal
+    // that the intent could not be persisted.
+    function rawGet(key) {
+      if (!DURABLE) return memStore.has(key) ? memStore.get(key) : null;
+      try { return localStorage.getItem(key); } catch (_) { return null; }
+    }
+    function rawSet(key, val) {
+      if (!DURABLE) { memStore.set(key, val); return true; }
+      try { localStorage.setItem(key, val); return true; } catch (_) { return false; }
+    }
+    function rawRemove(key) {
+      if (!DURABLE) { memStore.delete(key); return; }
+      try { localStorage.removeItem(key); } catch (_) {}
+    }
+
     // Adopt the pre-namespace keys under this user, then drop every other
     // user's namespace so a shared browser never leaks between accounts.
+    //
+    // The sweep is gated on HAVE_TOKEN_IDENTITY: deleting another namespace is
+    // only safe when the platform has actually told us who we are this load.
+    // On a token-less load we know nothing, so we touch nothing — that is the
+    // whole of the issue #47 data-loss fix.
     (function migrateStorage() {
+      if (!DURABLE) return;
       try {
         for (const [from, to] of [['todo:queue', QUEUE_KEY], ['todo:cache:home', HOME_KEY]]) {
           const v = localStorage.getItem(from);
@@ -392,17 +521,17 @@
             const to = NS + k.slice('todo:'.length);
             if (localStorage.getItem(to) == null) localStorage.setItem(to, localStorage.getItem(k));
             localStorage.removeItem(k);
-          } else if (/^todo:u[^:]+:/.test(k) && k.indexOf(NS) !== 0) {
+          } else if (HAVE_TOKEN_IDENTITY && /^todo:u[^:]+:/.test(k) && k.indexOf(NS) !== 0) {
             localStorage.removeItem(k);
           }
         }
-      } catch (_) { /* storage unavailable or full — the app still runs */ }
+      } catch (_) { /* storage full mid-sweep — the app still runs */ }
     })();
 
     function cacheSet(key, val) {
-      try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch (_) { return false; }
+      return rawSet(key, JSON.stringify(val));
     }
-    function cacheGet(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (_) { return null; } }
+    function cacheGet(key) { try { return JSON.parse(rawGet(key)); } catch (_) { return null; } }
 
     // A write that must not be lost (the queue) evicts cached list payloads
     // oldest-first — never the list on screen — and retries after each one.
@@ -413,12 +542,12 @@
       for (let i = lru.length - 1; i >= 0; i--) {
         const id = String(lru[i]);
         if (id === keepId) continue;
-        try { localStorage.removeItem(listKey(id)); } catch (_) {}
+        rawRemove(listKey(id));
         lru.splice(i, 1);
         cacheSet(LRU_KEY, lru);
         if (cacheSet(key, val)) return true;
       }
-      try { localStorage.removeItem(HOME_KEY); } catch (_) {}
+      rawRemove(HOME_KEY);
       return cacheSet(key, val);
     }
 
@@ -428,7 +557,7 @@
       const key = String(id);
       const lru = [key, ...(cacheGet(LRU_KEY) || []).filter(x => String(x) !== key)];
       for (const stale of lru.slice(MAX_CACHED_LISTS)) {
-        try { localStorage.removeItem(listKey(stale)); } catch (_) {}
+        rawRemove(listKey(stale));
       }
       cacheSet(LRU_KEY, lru.slice(0, MAX_CACHED_LISTS));
     }
@@ -498,8 +627,19 @@
     // our token, so the queue waits for a fresh one.
     let connState = navigator.onLine === false ? 'offline' : 'online';
     const isOnline = () => connState !== 'offline';
+    // Read by the Offline & storage read-out. Not persisted: "last sync" is a
+    // fact about this session, and a stale one from three days ago would read
+    // as reassurance rather than information.
+    let lastSyncAt = null;
+    // Said once per session, the first time being offline actually costs the
+    // user something on a device that won't let us save anything.
+    let nostoreWarned = false;
     function markOffline() {
       if (connState !== 'offline') connState = 'offline';
+      if (!DURABLE && !nostoreWarned) {
+        nostoreWarned = true;
+        toast("This device isn't allowing offline storage — changes are kept only until you close the app.");
+      }
       renderStrip();
       scheduleReplay();
     }
@@ -509,7 +649,7 @@
       if (connState !== 'offline' && connState !== 'blocked') connState = 'slow';
       renderStrip();
     }
-    function markOnline() { connState = 'online'; renderStrip(); }
+    function markOnline() { connState = 'online'; lastSyncAt = Date.now(); renderStrip(); }
 
     // Transient "All changes synced" confirmation.
     let stripFlash = null, stripFlashTimer = null;
@@ -528,15 +668,19 @@
       if (shot === 'offline') return { text: 'Offline — showing saved copy' };
       if (shot === 'syncing') return { text: 'Syncing 2 changes…' };
       if (shot === 'slow') return { text: 'Slow connection — 2 changes will sync', tap: true };
+      if (shot === 'nostore') return { text: 'Offline — changes will be lost if you close the app' };
       if (stripFlash) return { text: stripFlash, ok: true };
       const n = queueLength();
       if (connState === 'blocked') return { text: "Couldn't sync — tap to retry", tap: true };
       if (connState === 'offline') {
+        // Memory-only storage: never promise a saved copy we don't have, and
+        // never claim a queued change "will sync" when closing the app drops it.
+        if (!DURABLE) return { text: 'Offline — changes will be lost if you close the app' };
         return { text: n ? 'Offline — ' + plural(n) + ' will sync' : 'Offline — showing saved copy' };
       }
       if (connState === 'slow') {
         return n
-          ? { text: 'Slow connection — ' + plural(n) + ' will sync', tap: true }
+          ? { text: 'Slow connection — ' + (DURABLE ? plural(n) + ' will sync' : plural(n) + ' waiting'), tap: true }
           : { text: 'Slow connection…' };
       }
       // A drain in progress. Silent unless it is a real catch-up or it has
@@ -562,7 +706,8 @@
       const st = stripState();
       // Dimming of connection-only controls tracks the real state (or the
       // screenshot override, which is the whole point of the shot link).
-      document.body.classList.toggle('is-offline', connState === 'offline' || shot === 'offline');
+      document.body.classList.toggle('is-offline',
+        connState === 'offline' || shot === 'offline' || shot === 'nostore');
       if (!chip) return;
       if (!st) {
         chip.classList.add('hidden');
@@ -994,9 +1139,12 @@
     }
 
     // --- theme (light / dark / system) ----------------------------------------
+    // Not NS-namespaced on purpose: the pre-paint script in <head> reads this
+    // key before any identity is known, and a flash of the wrong theme is
+    // worse than two accounts on one browser sharing a light/dark choice.
     const THEME_KEY = 'todo:theme';
     function themePref() {
-      const v = localStorage.getItem(THEME_KEY);
+      const v = rawGet(THEME_KEY);
       return v === 'light' || v === 'dark' ? v : 'system';
     }
     function applyTheme() {
@@ -1012,8 +1160,8 @@
     function cycleTheme() {
       const order = ['system', 'light', 'dark'];
       const next = order[(order.indexOf(themePref()) + 1) % 3];
-      if (next === 'system') localStorage.removeItem(THEME_KEY);
-      else localStorage.setItem(THEME_KEY, next);
+      if (next === 'system') rawRemove(THEME_KEY);
+      else rawSet(THEME_KEY, next);
       applyTheme();
       updateThemeLabels();
     }
@@ -1029,20 +1177,34 @@
     });
 
     // --- show/hide completed preference (per user, localStorage) -------------
-    const SHOW_COMPLETED_KEY = 'todo:showCompleted';
+    // NS-namespaced for the same reason the read cache is (issue #47): two
+    // accounts on one browser used to share this preference. The un-namespaced
+    // key is read through once so nobody's existing setting flips on upgrade.
+    const SHOW_COMPLETED_KEY = NS + 'showCompleted';
+    (function migrateShowCompleted() {
+      if (!DURABLE) return;
+      try {
+        const old = localStorage.getItem('todo:showCompleted');
+        if (old != null && localStorage.getItem(SHOW_COMPLETED_KEY) == null) {
+          localStorage.setItem(SHOW_COMPLETED_KEY, old);
+        }
+        if (old != null && HAVE_TOKEN_IDENTITY) localStorage.removeItem('todo:showCompleted');
+      } catch (_) {}
+    })();
     function showCompleted() {
-      return localStorage.getItem(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
+      return rawGet(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
     }
     function setShowCompleted(v) {
-      localStorage.setItem(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
+      rawSet(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
       // The global switch resets any per-category overrides so flipping it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
-      // Fully-completed categories default to collapsed, so "Show all done"
-      // gives them an explicit override — otherwise they'd stay shut.
+      // Fully-completed categories default to COLLAPSED, so "Show all done"
+      // gives them an explicit override — otherwise the switch would flip and
+      // nothing on screen would change.
       if (v && current) {
         for (const c of current.categories) {
-          if (isCatFullyDone(c.id)) catDoneOverrides[c.id] = true;
+          if (isCatFullyDone(c.id)) setCatCollapsed(c.id, false);
         }
       }
       if (current) repaintAllCategories();
@@ -1070,7 +1232,10 @@
     // affordances stay in sync.
     function catShowDone(catId) {
       if (catDoneOverrides[catId] !== undefined) return catDoneOverrides[catId];
-      if (isCatFullyDone(catId)) return false; // finished categories collapse by default
+      // "Finished categories start shut" is now the whole-category collapse
+      // default (see catCollapsed) rather than a done-visibility special case —
+      // otherwise an explicitly expanded finished category would render an
+      // empty card, with every one of its items filtered out from under it.
       return showCompleted();
     }
     function toggleCatDone(catId) {
@@ -1078,6 +1243,59 @@
       // toggling would silently mutate the collapse state behind the search.
       if (searchActive()) return;
       catDoneOverrides[catId] = !catShowDone(catId);
+      repaintCategory(catId);
+    }
+
+    // --- whole-category collapse (issue #48) -----------------------------------
+    // The header chevron used to drive done-item visibility only, which meant
+    // it was a no-op on the common category — one with nothing ticked yet. So
+    // the name tap the issue asks for would have done nothing there. The
+    // chevron and the name now collapse the WHOLE category; done-item
+    // visibility keeps its own control (the "N done" divider row inside the
+    // card), so the two ideas stop fighting over one arrow.
+    //
+    // Persisted per list, per category, under NS — local-only state, so it
+    // works offline by construction and never needs a server round trip.
+    const collapsedKey = listId => NS + 'collapsed:' + listId;
+    let collapsedIds = null; // Set of category ids, lazily loaded for `current`
+
+    function collapsedSet() {
+      if (!current) return new Set();
+      if (!collapsedIds) {
+        collapsedIds = new Set((cacheGet(collapsedKey(current.list.id)) || []).map(Number));
+      }
+      return collapsedIds;
+    }
+    // Dropped whenever the open list changes, so one list's collapse state can
+    // never bleed into another's.
+    function resetCollapsed() { collapsedIds = null; }
+    function persistCollapsed() {
+      if (!current || !collapsedIds) return;
+      cacheSet(collapsedKey(current.list.id), [...collapsedIds]);
+    }
+
+    function catCollapsed(catId) {
+      const set = collapsedSet();
+      if (set.has(Number(catId))) return true;
+      if (set.has(-Number(catId))) return false; // explicit "keep open" marker
+      // No stored preference: a finished category starts shut, exactly as it
+      // did when the chevron only hid completed items.
+      return isCatFullyDone(catId);
+    }
+    function setCatCollapsed(catId, v) {
+      const set = collapsedSet();
+      const id = Number(catId);
+      set.delete(id); set.delete(-id);
+      // Both directions are recorded explicitly: the default is derived
+      // (isCatFullyDone), so "open" has to be storable to beat it.
+      set.add(v ? id : -id);
+      persistCollapsed();
+    }
+    function toggleCatCollapsed(catId) {
+      // Same guard as toggleCatDone: mid-search the header renders without its
+      // chevron and the filter owns what's visible, so don't mutate behind it.
+      if (searchActive()) return;
+      setCatCollapsed(catId, !catCollapsed(catId));
       repaintCategory(catId);
     }
 
@@ -1111,7 +1329,10 @@
       const opening = !openAdders.has(catId);
       if (openAdders.has(catId)) openAdders.delete(catId);
       else openAdders.add(catId);
-      // Opening the adder on a collapsed category auto-expands its done items.
+      // Opening the adder on a collapsed category auto-expands it — both the
+      // whole-category collapse and the done-items one, so the row the user is
+      // about to add is somewhere they can see it.
+      if (opening && catCollapsed(catId)) setCatCollapsed(catId, false);
       if (opening && !catShowDone(catId)) catDoneOverrides[catId] = true;
       repaintCategory(catId);
       if (openAdders.has(catId)) {
@@ -1216,6 +1437,8 @@
       else if (shotEmpty) loadShotEmpty();
       else if (shotUndo) loadShotUndo();
       else if (shotDue || shotDueEditor) loadShotDue();
+      else if (shotCollapsed) loadShotCollapsed();
+      else if (shotDiag) loadShotDiag();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -1344,6 +1567,37 @@
       return loadList(lists[0].id);
     }
 
+    // Screenshot-state deep link — `/?shot=collapsed` opens a list with its
+    // first real category collapsed. Collapsing takes a tap, and the capture
+    // harness can only navigate. Pure UI state: it flips the same local
+    // preference the chevron does and writes nothing to the database.
+    async function loadShotCollapsed() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(lists[0].id);
+      if (!current) return;
+      // Prefer a category with items and none of them ticked — the case the
+      // old chevron couldn't do anything with, and the point of the change.
+      const cats = current.categories.filter(c => !c.is_default);
+      const withItems = cats.filter(c => current.items.some(i => i.category_id === c.id));
+      const target = withItems.find(c => !current.items.some(i => i.category_id === c.id && i.checked))
+                  || withItems[0] || cats[0];
+      if (!target) return;
+      setCatCollapsed(target.id, true);
+      repaintAllCategories();
+    }
+
+    // Screenshot-state deep link — `/?shot=diag` opens the Offline & storage
+    // read-out, which lives two taps deep behind the ☰ menu. Read-only.
+    async function loadShotDiag() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) { await loadHome(); }
+      else { await loadList(lists[0].id); }
+      openDiagnostics();
+    }
+
     // Screenshot-state deep link — `/?shot=undo` opens a list with the undo
     // button live, which otherwise takes a mutation to reach. The entry it
     // stages describes a change already on screen, so nothing is written.
@@ -1384,6 +1638,7 @@
     async function loadHome() {
       current = null;
       clearHistory(); // undo is scoped to the open list
+      resetCollapsed(); // as is the collapse state
       disconnectEvents();
       const app = document.getElementById('app');
       const type = lastScreen === 'list' ? 'pop' : 'none';
@@ -1425,12 +1680,12 @@
     // If this browser shares storage with the platform iframe, a brand-new
     // account's first Home load turns it into their first real list.
     async function maybeImportLandingList(lists) {
-      const raw = localStorage.getItem('todo:landing-list');
+      const raw = rawGet('todo:landing-list');
       if (!raw || lists.length) return lists;
       let payload = null;
       try { payload = JSON.parse(raw); } catch (_) {}
       if (!payload || !Array.isArray(payload.categories) || !payload.categories.length) {
-        localStorage.removeItem('todo:landing-list');
+        rawRemove('todo:landing-list');
         return lists;
       }
       try {
@@ -1438,7 +1693,7 @@
           method: 'POST',
           body: JSON.stringify({ name: payload.name || 'Welcome', categories: payload.categories }),
         });
-        localStorage.removeItem('todo:landing-list');
+        rawRemove('todo:landing-list');
         return (await api('/api/lists')).lists;
       } catch (_) { return lists; } // keep the key; retried on a later load
     }
@@ -1536,8 +1791,9 @@
       searchQuery = pendingSearch;
       pendingSearch = '';
       // Switching lists (or a first open) starts with an empty history; a plain
-      // reload of the list already open keeps it.
-      if (!current || String(current.list.id) !== String(id)) clearHistory();
+      // reload of the list already open keeps it. The collapse cache is
+      // per-list, so it is dropped on the same condition.
+      if (!current || String(current.list.id) !== String(id)) { clearHistory(); resetCollapsed(); }
       const app = document.getElementById('app');
       const type = lastScreen === 'home' ? 'push' : 'none';
       const seq = ++loadSeq;
@@ -1865,6 +2121,7 @@
           <span>Include due dates</span>
           <input type="checkbox" class="un-switch due-switch" ${datesOn() ? 'checked' : ''} onchange="setDueDates(this.checked)">
         </label>` : ''}
+        <button onclick="closeDrawer(); openDiagnostics()" class="${c}">Offline &amp; storage</button>
         <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
         <button onclick="closeDrawer(); openImport('merge')" class="needs-net ${c}">Import markdown</button>
         <button onclick="cycleTheme()" data-theme-label class="${c}">Theme: ${themeLabel()}</button>
@@ -2011,6 +2268,15 @@
       const empty = !unchecked.length && !checked.length;
       if (isBucket && empty) return ''; // an empty bucket renders nothing
       const fullyDone = !unchecked.length && checked.length > 0;
+      // Whole-category collapse. The invisible bucket has no header, so it has
+      // nothing to collapse from; a search owns visibility outright.
+      const collapsed = !isBucket && !searching && catCollapsed(c.id);
+      const total = unchecked.length + checked.length;
+      // What the header says about what's hidden. A finished category counts
+      // its done items (that IS everything); otherwise it counts the lot.
+      const collapsedCount = fullyDone
+        ? checked.length + ' done'
+        : total + ' item' + (total === 1 ? '' : 's');
       // Top margin lives on the section (not a space-y on #cats) so a
       // repaintCategory outerHTML swap keeps it correct when the category's
       // completion state changes in place.
@@ -2021,24 +2287,34 @@
           ${isBucket ? '' : `
           <div class="cat-head flex items-center gap-1.5 px-2 py-1 mb-1.5">
             ${searching ? '' : `
-            <span class="drag-handle cat-drag select-none px-0.5 text-sm" style="color: var(--label3)" title="Drag to reorder categories">⠿</span>
-            <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed items in this category"
-                    class="select-none text-[10px] px-0.5 leading-none w-3 shrink-0" style="color: var(--label2)">
-              ${showDone ? '▼' : '▶'}
-            </button>`}
-            <h2 class="un-group-header flex-1 truncate cursor-pointer"
-                onclick="catTitleTap(event, ${c.id})" title="${IS_TOUCH ? (showDone ? 'Hide' : 'Show') + ' completed items' : 'Rename category'}">${esc(c.name)}</h2>
-            ${fullyDone && !searching ? `
-            <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
-                    class="text-[13px] select-none px-1" style="color: var(--label2)">
-              ${checked.length} done ${showDone ? '▾' : '▸'}
-            </button>` : ''}
-            ${searching ? '' : `
+            <span class="drag-handle cat-drag select-none" style="color: var(--label3)" title="Drag to reorder categories">⠿</span>`}
+            <!-- Chevron + name are ONE control: the collapse toggle. Keeping
+                 them in a single button makes the target ≥44px, gives the
+                 state one honest aria-expanded, and — because the chevron is a
+                 rotated glyph rather than a swapped ▶/▼ pair — means the row
+                 can't shift vertically when it toggles (issue #48). -->
+            <button type="button" class="cat-toggle flex-1 min-w-0 flex items-center gap-1.5"
+                    ${searching ? '' : `onclick="toggleCatCollapsed(${c.id})"`}
+                    aria-expanded="${collapsed ? 'false' : 'true'}"
+                    title="${searching ? '' : (collapsed ? 'Expand' : 'Collapse') + ' this category'}">
+              ${searching ? '' : `<span class="chev select-none" aria-hidden="true" style="color: var(--label2)">›</span>`}
+              <h2 class="un-group-header flex-1 truncate text-left">${esc(c.name)}</h2>
+            </button>
+            ${collapsed ? `
+            <span class="cat-count select-none text-[13px] px-1 shrink-0" style="color: var(--label3)">${collapsedCount}</span>` : ''}
+            ${searching || collapsed ? '' : `
             <button onclick="toggleAdder(${c.id})" title="Add an item"
                     class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
+            <!-- Rename lost its home when the title became the collapse
+                 control, so it gets an explicit one. Hover-revealed on desktop;
+                 hidden on touch, where the header's swipe action already
+                 carries Rename (see wireNative). -->
+            <button onclick="renameCategory(${c.id})" title="Rename category" aria-label="Rename category"
+                    class="needs-net cat-rename hover-action text-xs px-1.5 leading-none" style="color: var(--label3)">✎</button>
             <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
+          ${collapsed ? '' : `
           <div class="un-group">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
@@ -2058,18 +2334,25 @@
               </button>` : ''}
             </div>
             ${checked.length ? `
-            ${(fullyDone && !isBucket) || searching ? '' : `
+            <!-- The ONLY control for done-item visibility now that the header
+                 chevron collapses the whole category. Rendered for every
+                 category with completed items, finished ones included: an
+                 expanded finished category needs a way back to hiding them
+                 that isn't "collapse the card". -->
+            ${searching ? '' : `
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                     class="un-group-row w-full flex items-center justify-between px-4 py-2 text-[13px]" style="color: var(--label2)">
               <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
             </button>`}
             ${showDone ? `<div class="done-items">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
-          </div>
+          </div>`}
         </section>`;
     }
 
-    // Tapping anywhere on the row toggles the item; interactive children
-    // (checkbox, edit/delete buttons, drag handle) keep their own behavior.
+    // Tapping the row TEXT opens the item for renaming; only the circle ticks
+    // it (issue #48 — reading a list with a thumb on the screen used to change
+    // it). Interactive children — the checkbox and its 44px label, the due
+    // chip, the hover actions, the drag handle — keep their own behavior.
     // The kit's swipe recognizer suppresses the click that trails a swipe.
     // A row's id is read from the DOM at tap time, never captured at render
     // time: a queued add adopts its server id in place, so a value baked into
@@ -2077,17 +2360,8 @@
     const rowId = el => +el.closest('.item-row').dataset.item;
 
     function rowTap(ev, el) {
-      if (ev.target.closest('button, input, .drag-handle')) return;
-      const id = rowId(el);
-      const item = current.items.find(i => i.id === id);
-      if (item) toggleItem(id, !item.checked);
-    }
-
-    // On touch devices renaming goes through the swipe actions; a tap on the
-    // title toggles the done-items collapse instead.
-    function catTitleTap(ev, id) {
-      if (IS_TOUCH) { toggleCatDone(id); return; }
-      renameCategory(id);
+      if (ev.target.closest('button, input, label, .drag-handle, .due-chip')) return;
+      editItem(rowId(el));
     }
 
     function renderItem(i) {
@@ -2104,8 +2378,15 @@
           ${searchActive() ? '' : (dates
             ? `<span class="drag-handle select-none text-sm shrink-0" style="color: var(--label3)" title="Sorted by due date" onclick="dateSortHint()">⠿</span>`
             : `<span class="drag-handle item-drag select-none text-sm shrink-0" style="color: var(--label3)" title="Drag to reorder">⠿</span>`)}
-          <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(rowId(this), this.checked)"
-                 class="todo-check">
+          <!-- A <label>, deliberately: the 44px hit area is an overlay
+               pseudo-element on the wrapper, and only a label makes a tap
+               landing in that overlay toggle the enclosed input natively. It
+               can't go on the input itself — .todo-check:checked::after
+               already owns that pseudo-element to draw the tick. -->
+          <label class="check-hit" title="${i.checked ? 'Mark as not done' : 'Mark as done'}">
+            <input type="checkbox" ${i.checked ? 'checked' : ''} onchange="toggleItem(rowId(this), this.checked)"
+                   class="todo-check">
+          </label>
           <span class="flex-1 text-[16px] break-words ${i.checked ? 'line-through' : ''}"${i.checked ? ' style="color: var(--label2)"' : ''}>${esc(i.text)}</span>
           ${pending ? `<span class="pending-dot shrink-0 text-[15px] leading-none" data-pending-dot
                  title="Waiting to sync" aria-label="Waiting to sync">⋯</span>` : ''}
@@ -2932,6 +3213,102 @@
       // Set on the card itself so the width cap survives the kit's own rule.
       if (m.el) m.el.classList.add(wide ? 'modal-wide' : 'modal-narrow');
       return m;
+    }
+
+    // --- Offline & storage read-out (issue #47) ---------------------------------
+    // "Is offline actually working, especially in the app?" was the literal
+    // question the issue asked, and until now nothing could answer it: both
+    // failure modes (a service worker the WebView refuses to register, storage
+    // it refuses to grant) are silent. This is the answer — read-only, works
+    // offline, no writes, and screenshot-able from inside the native app.
+    let diagModal = null;
+
+    async function shellCacheState() {
+      if (!('caches' in window)) return 'not supported on this device';
+      try {
+        // Found by suffix rather than a hardcoded version string, so a
+        // CACHE_VERSION bump in sw.js can never make this lie.
+        const names = await caches.keys();
+        const shell = names.find(n => /-shell$/.test(n));
+        if (!shell) return 'not saved yet';
+        const hit = await caches.match('/index.html', { cacheName: shell });
+        return hit ? 'saved' : 'not saved yet';
+      } catch (_) { return 'unavailable'; }
+    }
+
+    async function swState() {
+      if (!('serviceWorker' in navigator)) return 'not supported on this device';
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) return 'not registered';
+        if (reg.active) return 'active';
+        if (reg.waiting) return 'registered (waiting)';
+        if (reg.installing) return 'installing';
+        return 'registered';
+      } catch (_) { return 'blocked by this browser'; }
+    }
+
+    function agoLabel(ts) {
+      if (!ts) return 'not yet this session';
+      const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+      if (s < 10) return 'just now';
+      if (s < 60) return s + ' seconds ago';
+      const m = Math.round(s / 60);
+      if (m < 60) return m + ' minute' + (m === 1 ? '' : 's') + ' ago';
+      const h = Math.round(m / 60);
+      return h + ' hour' + (h === 1 ? '' : 's') + ' ago';
+    }
+
+    function diagRow(label, value) {
+      return `<div class="flex items-start justify-between gap-3 py-1.5">
+                <span class="text-[13px] shrink-0" style="color: var(--label2)">${esc(label)}</span>
+                <span class="text-[13px] text-right" style="color: var(--label)">${esc(value)}</span>
+              </div>`;
+    }
+
+    async function openDiagnostics() {
+      if (!window.unNative) { toast('This needs the UI kit, which failed to load'); return; }
+      if (diagModal) diagModal.dismiss();
+      const el = document.createElement('div');
+      el.className = 'flex flex-col gap-2';
+      const savedLists = (cacheGet(LRU_KEY) || []).length;
+      const queued = queueLength();
+      el.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-semibold text-lg">Offline &amp; storage</h2>
+          <button onclick="closeDiagnostics()" class="x-close text-xl leading-none px-1 shrink-0">&times;</button>
+        </div>
+        <div id="diag-body" class="divide-y" style="border-color: var(--separator)">
+          ${diagRow('Saved for offline', 'checking…')}
+          ${diagRow('Background updater', 'checking…')}
+          ${diagRow('Storage on this device', DURABLE ? 'available' : 'not allowed — this session only')}
+          ${diagRow('Lists saved offline', String(savedLists))}
+          ${diagRow('Changes waiting to sync', String(queued))}
+          ${diagRow('Last successful sync', agoLabel(lastSyncAt))}
+        </div>
+        <p class="text-xs mt-1" style="color: var(--label3)">
+          Nothing here is sent anywhere — it describes what this device has saved.
+        </p>`;
+      const handle = presentAppModal(el, {
+        onDismiss: () => { if (diagModal === handle) diagModal = null; },
+      });
+      diagModal = handle;
+      // The two async probes fill in after the card is up, so opening it is
+      // never gated on a cache lookup.
+      const body = el.querySelector('#diag-body');
+      const [shell, sw] = await Promise.all([shellCacheState(), swState()]);
+      if (!body.isConnected) return; // dismissed while we were probing
+      body.innerHTML = [
+        diagRow('Saved for offline', shell),
+        diagRow('Background updater', sw),
+        diagRow('Storage on this device', DURABLE ? 'available' : 'not allowed — this session only'),
+        diagRow('Lists saved offline', String(savedLists)),
+        diagRow('Changes waiting to sync', String(queued)),
+        diagRow('Last successful sync', agoLabel(lastSyncAt)),
+      ].join('');
+    }
+    function closeDiagnostics() {
+      if (diagModal) diagModal.dismiss();
     }
 
     // Markdown import/export presents in the kit's centered modal (backdrop

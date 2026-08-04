@@ -95,8 +95,41 @@
     {
       "name": "The due-date editor opens on the phone-width card",
       "path": "/?shot=dueeditor",
-      "expectSelector": ".un-modal.modal-narrow .modal-card #due-editor #due-date-input",
+      "expectSelector": ".un-modal.modal-narrow .modal-card#due-editor #due-date-input",
       "expectText": "Due date"
+    },
+    {
+      "name": "A todo row's checkbox carries its own enlarged hit target",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".item-row label.check-hit .todo-check"
+    },
+    {
+      "name": "Category headers offer an explicit rename control",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".cat-head button.cat-rename"
+    },
+    {
+      "name": "The category name is the collapse control",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".cat-head button.cat-toggle[aria-expanded=true] .un-group-header"
+    },
+    {
+      "name": "A collapsed category hides its items and counts them instead",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".cat-head .cat-toggle[aria-expanded=false] ~ .cat-count",
+      "expectText": "items"
+    },
+    {
+      "name": "The offline and storage read-out renders",
+      "path": "/?shot=diag",
+      "expectSelector": ".un-modal.modal-narrow .modal-card #diag-body",
+      "expectText": "Saved for offline"
+    },
+    {
+      "name": "A device that refuses offline storage gets honest strip copy",
+      "path": "/?shot=nostore",
+      "expectSelector": "#offline-chip:not(.hidden)",
+      "expectText": "changes will be lost"
     }
   ],
   "visibility": {
