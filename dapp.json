@@ -48,6 +48,12 @@
       "expectText": "Members"
     },
     {
+      "name": "The invite box offers autocomplete instead of a free-text field",
+      "path": "/?shot=members",
+      "expectSelector": "#members-body form #invite-input[role=combobox] + #invite-suggest[role=listbox]",
+      "expectText": "You can only invite people who’ve used Todo List"
+    },
+    {
       "name": "Offline status strip renders",
       "path": "/?shot=offline",
       "expectSelector": "#offline-chip",

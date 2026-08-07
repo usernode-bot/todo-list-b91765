@@ -468,6 +468,57 @@ app.post('/api/lists/:id/import', async (req, res) => {
 // Members (owner only; invites take effect immediately)
 // ---------------------------------------------------------------------------
 
+// Username directory for invite autocomplete + validation. This app has no
+// user table of its own — the only handles it can vouch for are the ones that
+// already appear in its data: list owners, existing members, and whoever is
+// credited with creating or checking an item. That union is treated as the set
+// of usernames that "exist" for the purpose of inviting, so you can only invite
+// someone the app has actually seen.
+const KNOWN_USERNAMES_SQL = `
+  SELECT owner_username AS username FROM lists
+  UNION SELECT username FROM list_members
+  UNION SELECT created_by FROM items WHERE created_by IS NOT NULL
+  UNION SELECT last_checked_by FROM items WHERE last_checked_by IS NOT NULL
+`;
+
+// True when `username` is a handle the directory above has seen (case-insensitive).
+async function usernameExists(username) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM (${KNOWN_USERNAMES_SQL}) u
+      WHERE LOWER(u.username) = LOWER($1) LIMIT 1`,
+    [username]
+  );
+  return rows.length > 0;
+}
+
+// Typeahead for the invite box: known usernames matching a prefix, minus the
+// list owner and anyone already on the list. Owner-only, mirroring who may
+// invite. An empty query returns the directory (owner/members excluded) so the
+// box can suggest people the moment it's focused.
+app.get('/api/lists/:id/member-suggestions', async (req, res) => {
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+    if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can invite members' });
+    const q = (req.query.q || '').trim().replace(/^@/, '');
+    // Escape LIKE wildcards so a stray % or _ is matched as a literal character.
+    const prefix = q.replace(/[\\%_]/g, '\\$&');
+    const { rows } = await pool.query(
+      `SELECT DISTINCT u.username FROM (${KNOWN_USERNAMES_SQL}) u
+        WHERE ($2::text = '' OR LOWER(u.username) LIKE LOWER($2::text) || '%' ESCAPE '\\')
+          AND LOWER(u.username) <> LOWER($3::text)
+          AND LOWER(u.username) NOT IN (
+                SELECT LOWER(username) FROM list_members WHERE list_id = $1)
+        ORDER BY u.username
+        LIMIT 8`,
+      [list.id, prefix, list.owner_username]
+    );
+    res.json({ usernames: rows.map(r => r.username) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/lists/:id/members', async (req, res) => {
   try {
     const { list, role } = await getListRole(req.params.id, req.user);
@@ -477,6 +528,12 @@ app.post('/api/lists/:id/members', async (req, res) => {
     if (!username) return res.status(400).json({ error: 'Username is required' });
     if (username.toLowerCase() === (list.owner_username || '').toLowerCase()) {
       return res.status(400).json({ error: 'You already own this list' });
+    }
+    // Only invite handles the app has actually seen — see KNOWN_USERNAMES_SQL.
+    if (!(await usernameExists(username))) {
+      return res.status(422).json({
+        error: `@${username} hasn’t used Todo List yet — they need to open the app once before you can invite them.`,
+      });
     }
     const { rows } = await pool.query(
       `INSERT INTO list_members (list_id, username) VALUES ($1, $2)
