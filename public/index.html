@@ -298,7 +298,10 @@
     // live behind a tap, and screenshots/tests can only navigate — so without
     // these the mobile layout of either modal is uncapturable. Pure UI state:
     // they open a modal on an existing list and write nothing.
-    const shotModal = (shot === 'import' || shot === 'members') ? shot : '';
+    // `?shot=invite` is `?shot=members` with the typeahead already open: the
+    // suggestion list is the whole point of issue #50, and a shot of the
+    // closed field shows none of it.
+    const shotModal = (shot === 'import' || shot === 'members' || shot === 'invite') ? shot : '';
     // Screenshot/test deep links for the two states this change introduces:
     // the first-load skeleton (?shot=loading) and a row waiting to sync
     // (?shot=pending). Both only exist for a moment on a slow connection, so
@@ -1546,6 +1549,16 @@
       );
       renderList(current); // keep the header's 👥 count in step with the modal
       openMembers();
+      if (shotModal === 'invite') {
+        // Type the prefix the staging seed answers to and open the list, the
+        // same path a keystroke takes. Display-only: nothing is invited.
+        const { input } = inviteEls();
+        if (input) {
+          input.value = SHOT_INVITE_PREFIX;
+          input.focus();
+          await fetchInviteSuggestions(SHOT_INVITE_PREFIX);
+        }
+      }
     }
 
     // Screenshot-state deep link — `/?shot=empty` opens a list on a category
@@ -3478,6 +3491,9 @@
       const isOwner = current.role === 'owner';
       const body = document.getElementById('members-body');
       if (!body) return;
+      // The invite box is rebuilt below, so drop any suggestions belonging to
+      // the old one (and void an in-flight lookup that would repopulate them).
+      inviteHits = []; inviteAt = -1; inviteSeq++;
       body.innerHTML = `
         <div class="space-y-1.5 mb-4">
           <div class="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg" style="background: var(--fill)">
@@ -3492,15 +3508,135 @@
           ${!current.members.length ? '<p class="text-xs px-2 py-1 flex items-center gap-1.5" style="color: var(--label3)">' + lockSvg(11) + 'This list is private — only you can see it. Invite someone below to share it.</p>' : ''}
         </div>
         ${isOwner ? `
-          <form onsubmit="return inviteMember(event)" class="flex gap-2">
-            <input name="username" placeholder="Invite by username…" autocomplete="off" size="1"
-                   class="flex-1 min-w-0 rounded-lg px-3 py-2 text-sm focus:outline-none"
-                   style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
+          <form onsubmit="return inviteMember(event)" class="flex gap-2 items-start">
+            <div class="relative flex-1 min-w-0">
+              <input id="invite-input" name="username" placeholder="Invite by username…" autocomplete="off" size="1"
+                     role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="invite-suggest"
+                     oninput="onInviteInput()" onkeydown="onInviteKey(event)" onfocus="onInviteInput()"
+                     class="w-full min-w-0 rounded-lg px-3 py-2 text-sm focus:outline-none"
+                     style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
+              <!-- Opens upward: the invite row is the last thing in the card, so a
+                   downward list would be clipped by the modal's own scroll box. -->
+              <ul id="invite-suggest" role="listbox" aria-label="Matching usernames"
+                  class="hidden absolute left-0 right-0 bottom-full z-20 mb-1 py-1 rounded-lg shadow-lg"
+                  style="background: var(--card); border: 1px solid var(--separator); max-height: 11rem; overflow-y: auto"></ul>
+            </div>
             <button class="text-sm px-3 py-2 rounded-lg btn-primary shrink-0">Invite</button>
           </form>
-          <p class="text-[11px] mt-2" style="color: var(--label3)">Invites take effect immediately — the user will see this list next time they open the app.</p>`
+          <p class="text-[11px] mt-2" style="color: var(--label3)">You can only invite people who’ve used Todo List — start typing to find them. Invites take effect immediately.</p>`
         : '<p class="text-xs" style="color: var(--label3)">Only the owner can manage members.</p>'}
       `;
+    }
+
+    // --- invite autocomplete ----------------------------------------------------
+    // The invite box only accepts handles the server knows (see
+    // /api/lists/:id/member-suggestions). Suggestions are fetched per keystroke,
+    // debounced, and stale responses are dropped by sequence number so a slow
+    // reply can't overwrite a newer one. Purely additive: typing a full handle
+    // and pressing Enter still works without ever opening the list.
+    const INVITE_DEBOUNCE_MS = 180;
+    // Matches the handles seedDemoListFor puts in known_users — see ?shot=invite.
+    const SHOT_INVITE_PREFIX = 'staging-demo';
+    let inviteTimer = null, inviteSeq = 0, inviteHits = [], inviteAt = -1;
+
+    function inviteEls() {
+      return { input: document.getElementById('invite-input'), box: document.getElementById('invite-suggest') };
+    }
+
+    function onInviteInput() {
+      const { input } = inviteEls();
+      if (!input) return;
+      const q = input.value.trim().replace(/^@/, '');
+      if (inviteTimer) clearTimeout(inviteTimer);
+      inviteTimer = setTimeout(() => fetchInviteSuggestions(q), INVITE_DEBOUNCE_MS);
+    }
+
+    async function fetchInviteSuggestions(q) {
+      if (!current || !isOnline()) return;
+      const seq = ++inviteSeq;
+      let hits = [];
+      try {
+        ({ usernames: hits } = await api(
+          '/api/lists/' + current.list.id + '/member-suggestions?q=' + encodeURIComponent(q)));
+      } catch (_) {
+        // Suggestions are a convenience — a failed lookup just shows nothing.
+        // The invite itself is still validated server-side.
+        hits = [];
+      }
+      if (seq !== inviteSeq) return; // a newer keystroke already won
+      inviteHits = hits || [];
+      inviteAt = -1;
+      renderInviteSuggestions();
+    }
+
+    function renderInviteSuggestions() {
+      const { input, box } = inviteEls();
+      if (!input || !box) return;
+      const open = inviteHits.length > 0;
+      box.classList.toggle('hidden', !open);
+      input.setAttribute('aria-expanded', String(open));
+      box.innerHTML = inviteHits.map((u, i) => `
+        <li role="option" id="invite-opt-${i}" aria-selected="${i === inviteAt}"
+            onmousedown="event.preventDefault(); pickInvite(${i})"
+            class="px-3 py-2 text-sm cursor-pointer"
+            style="${i === inviteAt ? 'background: var(--fill)' : ''}">@${esc(u)}</li>`).join('');
+      // A screen reader follows the highlight through aria-activedescendant,
+      // not through the background colour above — without it, arrowing down
+      // the list announces nothing at all.
+      if (inviteAt >= 0) {
+        input.setAttribute('aria-activedescendant', 'invite-opt-' + inviteAt);
+        const opt = box.children[inviteAt];
+        if (opt && opt.scrollIntoView) opt.scrollIntoView({ block: 'nearest' });
+      } else {
+        input.removeAttribute('aria-activedescendant');
+      }
+    }
+
+    function closeInviteSuggestions() {
+      const { input, box } = inviteEls();
+      inviteHits = []; inviteAt = -1;
+      if (box) { box.classList.add('hidden'); box.innerHTML = ''; }
+      if (input) {
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-activedescendant');
+      }
+    }
+
+    // A tap anywhere outside the box dismisses it (the options themselves cancel
+    // their mousedown, so picking one never trips this first).
+    document.addEventListener('click', e => {
+      if (inviteHits.length && !e.target.closest('#invite-suggest, #invite-input')) closeInviteSuggestions();
+    });
+
+    function pickInvite(i) {
+      const { input } = inviteEls();
+      const pick = inviteHits[i];
+      if (!input || !pick) return;
+      input.value = pick;
+      closeInviteSuggestions();
+      input.focus();
+    }
+
+    // ↓/↑ move through the list, Enter takes the highlighted one (and otherwise
+    // falls through to the form's submit), Escape closes without clearing.
+    function onInviteKey(ev) {
+      if (ev.key === 'Escape') {
+        if (inviteHits.length) { ev.stopPropagation(); closeInviteSuggestions(); }
+        return;
+      }
+      if (!inviteHits.length) return;
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        const step = ev.key === 'ArrowDown' ? 1 : -1;
+        // Nothing highlighted yet (-1): ↓ takes the first, ↑ takes the last.
+        inviteAt = inviteAt < 0 && step < 0
+          ? inviteHits.length - 1
+          : (inviteAt + step + inviteHits.length) % inviteHits.length;
+        renderInviteSuggestions();
+      } else if (ev.key === 'Enter' && inviteAt >= 0) {
+        ev.preventDefault();
+        pickInvite(inviteAt);
+      }
     }
 
     function inviteMember(ev) {
@@ -3510,6 +3646,7 @@
       const input = form.elements.username;
       const username = input.value.trim();
       if (!username) return false;
+      closeInviteSuggestions();
       withBusy(form, async () => {
         try {
           await api('/api/lists/' + current.list.id + '/members', {
