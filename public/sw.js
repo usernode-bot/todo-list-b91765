@@ -14,7 +14,11 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-const CACHE_VERSION = 'todo-v3';
+// v4: the shell's Tailwind tag moved to the platform origin. The bump is what
+// makes that reach people who already have the app installed — activate drops
+// the v3 caches, so no returning user keeps a shell pointing at the old CDN,
+// and the stale cdn.tailwindcss.com asset entry goes with them.
+const CACHE_VERSION = 'todo-v4';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -38,7 +42,8 @@ const CACHEABLE_PATHS = new Set([SHELL_URL, '/theme.css', '/favicon.svg', '/land
 // deliberately tight: opaque cross-origin entries are padded heavily against
 // the storage quota.
 const ASSET_HOSTS = [
-  'cdn.tailwindcss.com',
+  // Tailwind now comes from the platform origin below, which is already
+  // listed — so the offline copy of it is still cached, under that host.
   'fonts.googleapis.com',
   'fonts.gstatic.com',
   'social-vibecoding.usernodelabs.org',

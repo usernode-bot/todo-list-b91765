@@ -68,7 +68,8 @@
     try { post('info', ['[dev-console ready]'], { kind: 'ready' }); } catch (_) {}
   })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Centrally hosted Tailwind runtime — see the note in index.html. -->
+  <script src="https://social-vibecoding.usernodelabs.org/usernode-tailwind/v1/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
