@@ -37,6 +37,8 @@ app.use((req, res, next) => {
       if (payload.pur === 'iframe') req.user = payload;
     } catch {}
   }
+  // Record the caller in the invite directory (see rememberUser below).
+  if (req.user) rememberUser(req.user);
 
   // Static assets (CSS/JS/images) are always served; the API and the HTML
   // shell are gated so direct hits to the staging/prod subdomain don't
@@ -47,6 +49,33 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// The invite directory: every user the app has authenticated. Invites are
+// validated against it (see the members routes), so what it records has to be
+// exactly what the rejection message claims — "has opened the app once".
+// Inferring that from leftover data instead (lists owned, items touched) locks
+// out every user who has opened the app and not yet made anything, which is
+// most of the people worth inviting.
+//
+// Deliberately a write on the auth path. The in-process cache keeps it to one
+// INSERT per user per container, and it is fire-and-forget so no request waits
+// on it. A failure drops the user from the cache so the next request retries,
+// rather than leaving a hole in the directory until the container restarts.
+const rememberedUsers = new Set();
+function rememberUser(user) {
+  if (!user || !user.username) return;
+  const key = user.username.toLowerCase();
+  if (rememberedUsers.has(key)) return;
+  rememberedUsers.add(key);
+  pool.query(
+    `INSERT INTO known_users (username) VALUES ($1)
+     ON CONFLICT (lower(username)) DO NOTHING`,
+    [user.username]
+  ).catch(err => {
+    rememberedUsers.delete(key);
+    console.error('known_users insert failed:', err.message);
+  });
+}
 
 app.get('/health', (_req, res) => {
   if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
@@ -468,27 +497,21 @@ app.post('/api/lists/:id/import', async (req, res) => {
 // Members (owner only; invites take effect immediately)
 // ---------------------------------------------------------------------------
 
-// Username directory for invite autocomplete + validation. This app has no
-// user table of its own — the only handles it can vouch for are the ones that
-// already appear in its data: list owners, existing members, and whoever is
-// credited with creating or checking an item. That union is treated as the set
-// of usernames that "exist" for the purpose of inviting, so you can only invite
-// someone the app has actually seen.
-const KNOWN_USERNAMES_SQL = `
-  SELECT owner_username AS username FROM lists
-  UNION SELECT username FROM list_members
-  UNION SELECT created_by FROM items WHERE created_by IS NOT NULL
-  UNION SELECT last_checked_by FROM items WHERE last_checked_by IS NOT NULL
-`;
-
-// True when `username` is a handle the directory above has seen (case-insensitive).
-async function usernameExists(username) {
+// Invite autocomplete + validation both read the `known_users` directory —
+// every user the app has authenticated (see rememberUser), plus everyone
+// backfilled on boot from data that predates the table. The platform exposes
+// no directory API an app can ask whether a handle exists, so the app can only
+// vouch for users it has met itself.
+//
+// Returns the STORED spelling of `username`, or null if the app has never seen
+// it. Case-insensitive, and canonical on purpose: a member row should record a
+// handle as its owner writes it, not as the inviter happened to type it.
+async function canonicalUsername(username) {
   const { rows } = await pool.query(
-    `SELECT 1 FROM (${KNOWN_USERNAMES_SQL}) u
-      WHERE LOWER(u.username) = LOWER($1) LIMIT 1`,
+    `SELECT username FROM known_users WHERE lower(username) = lower($1) LIMIT 1`,
     [username]
   );
-  return rows.length > 0;
+  return rows.length ? rows[0].username : null;
 }
 
 // Typeahead for the invite box: known usernames matching a prefix, minus the
@@ -504,11 +527,11 @@ app.get('/api/lists/:id/member-suggestions', async (req, res) => {
     // Escape LIKE wildcards so a stray % or _ is matched as a literal character.
     const prefix = q.replace(/[\\%_]/g, '\\$&');
     const { rows } = await pool.query(
-      `SELECT DISTINCT u.username FROM (${KNOWN_USERNAMES_SQL}) u
-        WHERE ($2::text = '' OR LOWER(u.username) LIKE LOWER($2::text) || '%' ESCAPE '\\')
-          AND LOWER(u.username) <> LOWER($3::text)
-          AND LOWER(u.username) NOT IN (
-                SELECT LOWER(username) FROM list_members WHERE list_id = $1)
+      `SELECT u.username FROM known_users u
+        WHERE ($2::text = '' OR lower(u.username) LIKE lower($2::text) || '%' ESCAPE '\\')
+          AND lower(u.username) <> lower($3::text)
+          AND lower(u.username) NOT IN (
+                SELECT lower(username) FROM list_members WHERE list_id = $1)
         ORDER BY u.username
         LIMIT 8`,
       [list.id, prefix, list.owner_username]
@@ -529,19 +552,22 @@ app.post('/api/lists/:id/members', async (req, res) => {
     if (username.toLowerCase() === (list.owner_username || '').toLowerCase()) {
       return res.status(400).json({ error: 'You already own this list' });
     }
-    // Only invite handles the app has actually seen — see KNOWN_USERNAMES_SQL.
-    if (!(await usernameExists(username))) {
+    // Only invite handles the app has actually seen — see canonicalUsername.
+    const canonical = await canonicalUsername(username);
+    if (!canonical) {
       return res.status(422).json({
         error: `@${username} hasn’t used Todo List yet — they need to open the app once before you can invite them.`,
       });
     }
+    // Stored under the canonical spelling, so inviting "BOB" doesn't leave
+    // "BOB" in the members list of someone whose handle is "bob".
     const { rows } = await pool.query(
       `INSERT INTO list_members (list_id, username) VALUES ($1, $2)
        ON CONFLICT (list_id, lower(username)) DO NOTHING
        RETURNING *`,
-      [list.id, username]
+      [list.id, canonical]
     );
-    if (!rows.length) return res.status(409).json({ error: `@${username} is already a member` });
+    if (!rows.length) return res.status(409).json({ error: `@${canonical} is already a member` });
     notify(list.id, req);
     res.json({ member: rows[0] });
   } catch (err) {
@@ -975,6 +1001,16 @@ async function seedDemoListFor(user) {
       `INSERT INTO list_members (list_id, username) VALUES ($1, 'staging-demo-user')`,
       [shared.id]
     );
+    // The invite box only offers handles from known_users, which is
+    // staging:private and therefore empty here — the tester adds themself just
+    // by loading the app, but a typeahead needs somebody to find. Obviously
+    // fake, and enough of them to fill the list in the preview screenshot.
+    await client.query(
+      `INSERT INTO known_users (username) VALUES
+         ('staging-demo-user'), ('staging-demo-alex'),
+         ('staging-demo-sam'), ('staging-demo-priya')
+       ON CONFLICT (lower(username)) DO NOTHING`
+    );
     // A third list with due dates switched ON, so the dated presentation
     // (chips, "Today"/"Tomorrow", the overdue row) has data in staging.
     // Dates are relative to CURRENT_DATE so the seed never goes stale.
@@ -1072,6 +1108,34 @@ async function start() {
     CREATE INDEX IF NOT EXISTS items_due_idx ON items (due_date) WHERE due_date IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS items_client_op_id_key
       ON items (client_op_id) WHERE client_op_id IS NOT NULL;
+
+    -- Everyone the app has authenticated, which is what an invite is validated
+    -- against (issue #50). Private: a roster of who uses this app is more than
+    -- the single public username the platform already shows, and staging has
+    -- no business holding it.
+    CREATE TABLE IF NOT EXISTS known_users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(255) NOT NULL,
+      first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    COMMENT ON TABLE known_users IS 'staging:private';
+    CREATE UNIQUE INDEX IF NOT EXISTS known_users_lower_username_idx
+      ON known_users (lower(username));
+
+    -- Backfill from the data that predates the table so everyone already using
+    -- the app is invitable the moment this deploys, rather than only after
+    -- they next open it. Idempotent: the unique index above absorbs re-runs,
+    -- and DISTINCT ON collapses handles that differ only by case.
+    INSERT INTO known_users (username)
+    SELECT DISTINCT ON (lower(u.username)) u.username FROM (
+      SELECT owner_username AS username FROM lists
+      UNION ALL SELECT username FROM list_members
+      UNION ALL SELECT created_by FROM items WHERE created_by IS NOT NULL
+      UNION ALL SELECT last_checked_by FROM items WHERE last_checked_by IS NOT NULL
+    ) u
+    WHERE u.username IS NOT NULL AND u.username <> ''
+    ORDER BY lower(u.username), u.username
+    ON CONFLICT (lower(username)) DO NOTHING;
 
     -- The default category is now the invisible "uncategorized" bucket.
     -- A renamed default was evidently being used as a real category, so it
