@@ -68,7 +68,13 @@
   })();
   </script>
   <title>Todo List</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind runtime — centrally hosted, like the bridge and the native kit.
+       Byte-for-byte the copy cdn.tailwindcss.com serves (3.4.17), so the
+       config below and every class on the page behave identically. The point
+       is the dependency, not the bytes: the public CDN is one outside host
+       shared by the whole fleet, and when it is blocked or down every app it
+       serves loads unstyled. -->
+  <script src="https://social-vibecoding.usernodelabs.org/usernode-tailwind/v1/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
