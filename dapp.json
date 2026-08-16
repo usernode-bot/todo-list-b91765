@@ -94,6 +94,18 @@
       "expectText": "No items yet"
     },
     {
+      "name": "A finished category keeps a lane to drop items into",
+      "path": "/?shot=drop",
+      "expectSelector": ".cat-section .active-items button.empty-note.done-note",
+      "expectText": "All done — add another"
+    },
+    {
+      "name": "The finished category still shows its completed row beside that lane",
+      "path": "/?shot=drop",
+      "expectSelector": ".cat-section .done-items .item-row[data-checked=\"1\"]",
+      "expectText": "Renew the travel insurance"
+    },
+    {
       "name": "Undo is available in the list header after a change",
       "path": "/?shot=undo",
       "expectSelector": "#undo-btn[aria-disabled=false]:not([disabled])"

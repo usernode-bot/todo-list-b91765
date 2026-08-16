@@ -14,11 +14,11 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-// v4: the shell's Tailwind tag moved to the platform origin. The bump is what
-// makes that reach people who already have the app installed — activate drops
-// the v3 caches, so no returning user keeps a shell pointing at the old CDN,
-// and the stale cdn.tailwindcss.com asset entry goes with them.
-const CACHE_VERSION = 'todo-v4';
+// v5: the shell's reorder rules changed (issue #51 — a category holding a
+// single item can be dragged into again). The bump is what makes that reach
+// people who already have the app installed: activate drops the v4 caches, so
+// no returning user keeps running the old shell out of cache.
+const CACHE_VERSION = 'todo-v5';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
