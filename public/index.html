@@ -331,6 +331,12 @@
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
     const shotNostore = shot === 'nostore';
+    // Screenshot/test deep link for the state this change introduces: a
+    // finished category expanded to show the lane a dragged row now lands on
+    // (?shot=drop). Finished categories start shut and dragging is a gesture,
+    // so neither the expand nor the drop is reachable by navigation alone.
+    // Pure UI state — it flips the same local preference the chevron does.
+    const shotDrop = shot === 'drop';
 
     // Deadlines. Every request gets one: without them a stalled TCP connection
     // hangs the promise for as long as the browser's own timeout (often
@@ -1447,6 +1453,7 @@
       else if (shotUndo) loadShotUndo();
       else if (shotDue || shotDueEditor) loadShotDue();
       else if (shotCollapsed) loadShotCollapsed();
+      else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
       else loadHome();
     }
@@ -1604,6 +1611,22 @@
                   || withItems[0] || cats[0];
       if (!target) return;
       setCatCollapsed(target.id, true);
+      repaintAllCategories();
+    }
+
+    // Screenshot-state deep link — `/?shot=drop` opens a list with a FINISHED
+    // category expanded, which is where issue #51's drop lane shows. Finished
+    // categories start shut, so this takes a tap the capture harness can't do.
+    // Pure UI state: it writes nothing to the database.
+    async function loadShotDrop() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(lists[0].id);
+      if (!current) return;
+      const target = current.categories.find(c => !c.is_default && isCatFullyDone(c.id));
+      if (!target) return;
+      setCatCollapsed(target.id, false);
       repaintAllCategories();
     }
 
@@ -2287,6 +2310,15 @@
       const empty = !unchecked.length && !checked.length;
       if (isBucket && empty) return ''; // an empty bucket renders nothing
       const fullyDone = !unchecked.length && checked.length > 0;
+      // The active area always keeps a lane, even when everything in the
+      // category is ticked off — that lane is what a dragged row lands on
+      // (issue #51). Without it a finished category renders its active area
+      // `hidden` and offers the reorder kit nothing to hit, so a category
+      // holding a single done item — its whole card being that one item —
+      // couldn't be dragged into at all. Mid-search it stays out of the way:
+      // the filter, not the category, decides what is on screen there, and
+      // reorder is off anyway.
+      const activeLane = !unchecked.length && (empty || !searching);
       // Whole-category collapse. The invisible bucket has no header, so it has
       // nothing to collapse from; a search owns visibility outright.
       const collapsed = !isBucket && !searching && catCollapsed(c.id);
@@ -2342,14 +2374,14 @@
                      onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
                      class="flex-1 bg-transparent text-[15px] focus:outline-none py-1" style="color: var(--label)">
             </form>` : ''}
-            <div class="active-items${unchecked.length || empty ? '' : ' hidden'}">
+            <div class="active-items${unchecked.length || activeLane ? '' : ' hidden'}">
               ${unchecked.map(renderItem).join('')}
-              ${empty ? `
-              <button type="button" onclick="emptyNoteTap(${c.id})" title="Add the first item"
-                      class="empty-note un-group-row un-pressable un-touch-target w-full flex items-center gap-2.5 px-4 py-2.5 text-[13px] text-left cursor-pointer"
+              ${activeLane ? `
+              <button type="button" onclick="emptyNoteTap(${c.id})" title="${empty ? 'Add the first item' : 'Add an item'}"
+                      class="empty-note${empty ? '' : ' done-note'} un-group-row un-pressable un-touch-target w-full flex items-center gap-2.5 px-4 py-2.5 text-[13px] text-left cursor-pointer"
                       style="color: var(--label2)">
                 <span class="tinted text-[18px] leading-none select-none" aria-hidden="true">+</span>
-                <span>No items yet</span>
+                <span>${empty ? 'No items yet' : 'All done — add another'}</span>
               </button>` : ''}
             </div>
             ${checked.length ? `
@@ -2605,11 +2637,24 @@
       const checked = !!item.checked;
       const toCat = +sec.dataset.cat;
       const fromCat = item.category_id;
-      // Items only reorder within their own checked/unchecked section; an
-      // empty category accepts either state. Anything else is undone.
-      const otherRows = Array.from(sec.querySelectorAll('.item-row')).filter(r => +r.dataset.item !== id);
+      // Reordering WITHIN a category still can't cross the done divider: the
+      // two sections are ordered separately, so a row dropped in the wrong one
+      // is meaningless and gets undone. A move INTO another category does mean
+      // something — the user is choosing the category, and the row belongs in
+      // whichever of its sections matches its own checked state — so the lane
+      // it landed in is ignored there. Demanding a matching lane is what made a
+      // category holding a single item undroppable (issue #51): one item is one
+      // section, so half of every drag into it landed in the "wrong" lane and
+      // sprang straight back out.
       const landedInDone = !!el.closest('.done-items');
-      if (otherRows.length && landedInDone !== checked) { scheduleReorderRepaint(repaintAllCategories); return; }
+      if (fromCat === toCat) {
+        const otherRows = Array.from(sec.querySelectorAll('.item-row')).filter(r => +r.dataset.item !== id);
+        if (otherRows.length && landedInDone !== checked) { scheduleReorderRepaint(repaintAllCategories); return; }
+      }
+      // A done row dropped into a category whose completed items are hidden
+      // would vanish on the repaint below — the drag would read as a delete.
+      // Open that category's done section so what was just placed stays put.
+      if (fromCat !== toCat && checked && !catShowDone(toCat)) catDoneOverrides[toCat] = true;
       // New order = visible DOM order of this section's matching rows.
       const ids = Array.from(sec.querySelectorAll('.item-row'))
         .filter(r => (r.dataset.checked === '1') === checked)

@@ -964,6 +964,13 @@ async function seedDemoListFor(user) {
        VALUES ($1, 'Things to sort out before the trip', FALSE, 4) RETURNING id`,
       [list.id]
     )).rows[0];
+    // A FINISHED category holding exactly one item. Its whole card is that one
+    // ticked row, which is the case issue #51 reported as undroppable — so
+    // staging needs one to exercise the drop lane and the cross-category move.
+    const sorted = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Sorted', FALSE, 5) RETURNING id`,
+      [list.id]
+    )).rows[0];
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
          ($1, 'Plan Saturday hike', FALSE, 1, NULL, $5),
@@ -976,8 +983,9 @@ async function seedDemoListFor(user) {
          ($3, 'Pick up the parcel', FALSE, 2, NULL, $5),
          ($3, 'Top up the travel card', FALSE, 3, NULL, $5),
          ($4, 'Check the tyre pressures', FALSE, 1, NULL, $5),
-         ($4, 'Find the spare house key', FALSE, 2, NULL, $5)`,
-      [general.id, groceries.id, errands.id, longCat.id, user.username]
+         ($4, 'Find the spare house key', FALSE, 2, NULL, $5),
+         ($6, 'Renew the travel insurance', TRUE, 1, NOW(), $5)`,
+      [general.id, groceries.id, errands.id, longCat.id, user.username, sorted.id]
     );
     // A second, shared list so the owner-inclusive member count is visible
     // on Home ("2 members" = the tester + staging-demo-user).
