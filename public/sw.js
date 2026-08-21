@@ -18,7 +18,7 @@
 // single item can be dragged into again). The bump is what makes that reach
 // people who already have the app installed: activate drops the v4 caches, so
 // no returning user keeps running the old shell out of cache.
-const CACHE_VERSION = 'todo-v5';
+const CACHE_VERSION = 'todo-v6';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -49,9 +49,54 @@ const ASSET_HOSTS = [
   'social-vibecoding.usernodelabs.org',
 ];
 
+// The hosted files the shell CANNOT render without: the kit's stylesheet
+// carries every surface, Tailwind carries the layout, and /theme.css layers
+// this app's palette on top. They were cached opportunistically — only ever
+// as a side effect of an online load having already requested them — so the
+// first offline load after an install, a cache prune or a version bump could
+// come up without them. A page that paints with no stylesheet is not
+// "degraded", it is unreadable (and with no --bg it is white, whatever the
+// theme says), so these are fetched up front like the rest of the shell.
+//
+// This is caching, NOT vendoring: nothing is copied into the repo, the URLs
+// stay the platform's own, and staleWhileRevalidate still refreshes each of
+// them on every online load — so a fleet-wide kit fix still lands on the very
+// next load, exactly as the platform conventions require.
+const HOSTED_ASSETS = [
+  'https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css',
+  'https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js',
+  'https://social-vibecoding.usernodelabs.org/usernode-tailwind/v1/tailwind.js',
+  'https://social-vibecoding.usernodelabs.org/usernode-bridge/v1/bridge.js',
+];
+
+// A hard deadline on the hosted fetches. Without one, installing while that
+// host is slow or unreachable holds the install event open for as long as the
+// network takes to give up — and until install resolves there is no active
+// worker, so a reload in that window gets no offline shell at all. The
+// same-origin precache below is the part that must not be delayed.
+const HOSTED_FETCH_TIMEOUT_MS = 6000;
+
+function fetchWithDeadline(url) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = setTimeout(() => { if (ctl) ctl.abort(); }, HOSTED_FETCH_TIMEOUT_MS);
+  return fetch(url, { mode: 'no-cors', cache: 'reload', ...(ctl ? { signal: ctl.signal } : {}) })
+    .finally(() => clearTimeout(timer));
+}
+
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(SHELL_CACHE);
+    // Cross-origin, so `no-cors`: the responses are opaque, which is all a
+    // <link> or <script> needs. Best-effort and deadlined — an unreachable
+    // host must not stop, or even slow, the same-origin shell being precached.
+    const assets = await caches.open(ASSET_CACHE);
+    await Promise.all(HOSTED_ASSETS.map(async url => {
+      try {
+        const res = await fetchWithDeadline(url);
+        // An opaque response reports ok:false and status 0 by design.
+        if (res && (res.ok || res.type === 'opaque')) await assets.put(url, res.clone());
+      } catch (_) { /* unreachable or too slow — the online path fills it in */ }
+    }));
     // Individually, not addAll: one unavailable file must not fail the whole
     // install and leave the app with no service worker at all.
     await Promise.all(PRECACHE.map(async url => {

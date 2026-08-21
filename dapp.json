@@ -161,6 +161,18 @@
       "expectText": "changes will be lost"
     },
     {
+      "name": "Home shows progress while it saves every list for offline",
+      "path": "/?shot=syncbar",
+      "expectSelector": "#sync-bar:not(.hidden) .sync-track .sync-fill",
+      "expectText": "Saving lists for offline"
+    },
+    {
+      "name": "...and says so when every list is saved",
+      "path": "/?shot=syncdone",
+      "expectSelector": "#sync-bar:not(.hidden) .sync-fill",
+      "expectText": "All lists saved for offline"
+    },
+    {
       "name": "An offline boot with nothing saved keeps the app's chrome and explains itself",
       "path": "/?shot=nocache",
       "expectSelector": "body.is-offline #app header#home-bar ~ div button",

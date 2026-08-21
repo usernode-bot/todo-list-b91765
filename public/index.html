@@ -85,6 +85,14 @@
         var dark = pref === 'dark' ||
           (pref !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
         document.documentElement.classList.toggle('dark', dark);
+        // The FLOOR under the palette. Every colour on this page comes from
+        // /theme.css — including `body { background: var(--bg) }` — so a load
+        // where that stylesheet is missing has no background at all and the
+        // browser paints its default WHITE, which is what "offline is stuck in
+        // light mode" looks like. `color-scheme` is honoured by the UA itself,
+        // needs no stylesheet, and costs one property: with it, the worst case
+        // is an unstyled DARK page instead of a blinding one.
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
       } catch (_) {}
     })();
   </script>
@@ -147,6 +155,34 @@
     body.no-navbar #offline-chip { top: env(safe-area-inset-top); }
     /* Make room so the strip never covers the first row of content. */
     body.has-strip #app { padding-top: 2.15rem; }
+
+    /* Offline sync progress — Home only, pinned to the bottom. The status
+       strip owns the top (under the nav bar); this owns the bottom, and the
+       two never describe the same thing at the same time. Short-lived by
+       design: it appears while lists are being saved and removes itself when
+       they are. #app already reserves pb-24, so nothing hides behind it. */
+    #sync-bar {
+      position: fixed; left: 0; right: 0;
+      bottom: env(safe-area-inset-bottom);
+      z-index: 60;
+      background: var(--card); color: var(--label);
+      border-top: 1px solid var(--separator);
+      font-size: 12.5px; font-weight: 500;
+      padding: 9px 16px 10px;
+      display: flex; flex-direction: column; gap: 7px;
+      box-shadow: 0 -2px 12px rgba(0, 0, 0, .10);
+    }
+    /* Own the hidden rule rather than leaning on Tailwind — same reasoning as
+       the status strip: the runtime may not be warm on a cold offline load. */
+    #sync-bar.hidden { display: none; }
+    #sync-bar .sync-track {
+      height: 3px; border-radius: 2px; background: var(--fill2); overflow: hidden;
+    }
+    #sync-bar .sync-fill {
+      height: 100%; width: 0; border-radius: 2px; background: var(--tint);
+      transition: width .25s ease;
+    }
+    @media (prefers-reduced-motion: reduce) { #sync-bar .sync-fill { transition: none } }
 
     /* First-load placeholders. Only ever drawn when there is no saved copy of
        the screen to paint, so content lands into the same shape instead of
@@ -306,6 +342,7 @@
 <body class="min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
   <div id="offline-chip" class="hidden" role="status" aria-live="polite" onclick="onStripTap()"></div>
+  <div id="sync-bar" class="hidden" role="status" aria-live="polite"></div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -349,6 +386,10 @@
     // `?shot=nocache` is the offline boot this change is about: connected
     // once never happened, so there is no saved copy to paint. Display-only,
     // like every other shot link — it writes nothing and reads nothing.
+    // `?shot=syncbar` / `?shot=syncdone` — the offline-sync bar mid-pass and
+    // finished. Both are display-only: they never fetch, never write, and the
+    // real pass stands down while they are on (see prefetchLists).
+    const shotSync = shot === 'syncbar' || shot === 'syncdone';
     const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
@@ -623,6 +664,20 @@
         rawRemove(listKey(stale));
       }
       cacheSet(LRU_KEY, lru.slice(0, MAX_CACHED_LISTS));
+    }
+
+    // Prefetch's counterpart to touchList. A list saved in the background was
+    // NOT opened, so it joins the tail rather than the head: an explicitly
+    // opened list always outranks one we merely saved, and is evicted last.
+    // Returns false when the cap leaves no room, which is the caller's signal
+    // to stop rather than start evicting the user's own lists.
+    function rememberSaved(id) {
+      const key = String(id);
+      const lru = cacheGet(LRU_KEY) || [];
+      if (lru.some(x => String(x) === key)) return true;
+      if (lru.length >= MAX_CACHED_LISTS) return false;
+      lru.push(key);
+      return cacheSet(LRU_KEY, lru);
     }
 
     function cacheList() {
@@ -1228,6 +1283,8 @@
       const dark = pref === 'dark' ||
         (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.classList.toggle('dark', dark);
+      // Keep the UA-level floor in step with the class — see the boot script.
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
     }
     function themeLabel() {
       const pref = themePref();
@@ -1513,6 +1570,7 @@
       else if (shotEmpty) loadShotEmpty();
       else if (shotUndo) loadShotUndo();
       else if (shotDue || shotDueEditor) loadShotDue();
+      else if (shotSync) loadShotSync();
       else if (shotNocache) loadShotNocache();
       else if (shotCollapsed) loadShotCollapsed();
       else if (shotDrop) loadShotDrop();
@@ -1679,6 +1737,15 @@
       return items.length > 0 && items.every(i => i.checked);
     }
 
+    // Screenshot-state deep link — `/?shot=syncbar` / `/?shot=syncdone` paint
+    // Home with the offline-sync bar mid-pass and finished. A real pass is over
+    // in a moment on a fast connection and skips lists already saved, so
+    // neither state is reachable by navigating.
+    async function loadShotSync() {
+      await loadHome();
+      renderSyncBar();
+    }
+
     // Screenshot-state deep link — `/?shot=nocache` paints Home as a device
     // that has never had the app open while connected meets it offline: the
     // chrome, the plain explanation, and a strip that admits there is nothing
@@ -1804,6 +1871,8 @@
         // and retrying is what the queue already does for the same reason.
         homeSaveFailed = !cacheSetOrEvict(HOME_KEY, lists);
         showingSaved = false;
+        // Not awaited: Home is already on screen and this is background work.
+        prefetchLists(lists);
       } catch (e) {
         if (seq !== loadSeq || current) return;
         // The saved copy is already on screen; the status strip explains why it
@@ -1913,6 +1982,7 @@
       wireNative();
       // The chrome just appeared (or didn't) — re-anchor the strip to match.
       renderStrip();
+      renderSyncBar();
     }
 
     // What Home says when this device has never held a copy of it. Deliberately
@@ -1926,6 +1996,104 @@
                   time, even with no signal.</p>
                 <button onclick="loadHome()" class="tinted text-[15px] font-medium mt-4">Try again</button>
               </div>`;
+    }
+
+    // --- saving every list for offline ---------------------------------------
+    // Opening a list used to be the only thing that saved it. So offline, Home
+    // painted from its saved copy and every row on it led to "This list isn't
+    // available offline" — the shape of an app that looks ready and isn't.
+    // Home now pulls each list in the background once it has loaded, so what
+    // is on screen is actually openable.
+    //
+    // Deliberately modest. One request at a time, so a phone on a slow link is
+    // never flooded; skipped entirely while offline; abandoned the moment a
+    // newer Home load starts; and it NEVER evicts — a list saved in the
+    // background must not push out one the user actually opened, so a full
+    // store stops the pass and says so instead. MAX_CACHED_LISTS is what keeps
+    // a large account from filling the device, and lists past it are reported
+    // rather than silently dropped.
+    let syncState = null;   // { done, total, skipped, failed } while a pass runs
+    let syncSeq = 0;
+    let syncHideTimer = null;
+
+    async function prefetchLists(lists) {
+      const mySeq = ++syncSeq;
+      clearTimeout(syncHideTimer);
+      syncState = null;
+      if (shotSync) { renderSyncBar(); return; }   // display-only shot owns the bar
+      if (!DURABLE || !isOnline() || !Array.isArray(lists)) { renderSyncBar(); return; }
+      const targets = lists.slice(0, MAX_CACHED_LISTS);
+      const skipped = lists.length - targets.length;
+      const missing = targets.filter(l => !cacheGet(listKey(l.id)));
+      if (!missing.length) { renderSyncBar(); return; }
+
+      syncState = { done: 0, total: missing.length, skipped, failed: false };
+      renderSyncBar();
+      let stoppedEarly = false;
+      for (const l of missing) {
+        if (mySeq !== syncSeq) return;            // a newer Home load owns this now
+        if (!isOnline()) { stoppedEarly = true; break; }
+        let d = null;
+        try {
+          d = await api('/api/lists/' + l.id, { timeoutMs: LOAD_TIMEOUT_MS });
+        } catch (_) {
+          // Went offline, or the list is gone. Stop quietly — the next Home
+          // load picks up wherever this one got to.
+          stoppedEarly = true;
+          break;
+        }
+        if (mySeq !== syncSeq) return;
+        if (!cacheSet(listKey(l.id), d) || !rememberSaved(l.id)) {
+          syncState.failed = true;
+          break;
+        }
+        syncState.done++;
+        renderSyncBar();
+      }
+      if (mySeq !== syncSeq) return;
+      if (stoppedEarly && !syncState.failed) { syncState = null; renderSyncBar(); return; }
+      renderSyncBar();
+      // Let the finished state be readable, then take the bar away.
+      syncHideTimer = setTimeout(() => {
+        if (mySeq !== syncSeq) return;
+        syncState = null;
+        renderSyncBar();
+      }, syncState.failed ? 4200 : 2600);
+    }
+
+    const plurLists = n => n + (n === 1 ? ' list' : ' lists');
+
+    function syncBarState() {
+      // Display-only deep links, so the bar is capturable: neither writes.
+      if (shot === 'syncbar') return { text: 'Saving lists for offline… 2 of 5', pct: 20 };
+      if (shot === 'syncdone') return { text: 'All lists saved for offline', ok: true, pct: 100 };
+      if (current) return null;   // list view; the top strip speaks there
+      if (!syncState) return null;
+      const { done, total, skipped, failed } = syncState;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      if (failed) {
+        return { text: 'Saved ' + plurLists(done) + ' — not enough storage for the rest', pct };
+      }
+      if (done >= total) {
+        return skipped
+          ? { text: 'Saved ' + plurLists(total) + ' for offline · ' + skipped + ' more won\'t fit', ok: true, pct: 100 }
+          : { text: 'All lists saved for offline', ok: true, pct: 100 };
+      }
+      return { text: 'Saving lists for offline… ' + (done + 1) + ' of ' + total, pct };
+    }
+
+    function renderSyncBar() {
+      const bar = document.getElementById('sync-bar');
+      if (!bar) return;
+      const st = syncBarState();
+      if (!st) {
+        bar.classList.add('hidden');
+        bar.textContent = ''; // don't leave stale text in the a11y tree
+        return;
+      }
+      bar.innerHTML = '<div>' + esc(st.text) + '</div>'
+        + '<div class="sync-track"><div class="sync-fill" style="width: ' + st.pct + '%"></div></div>';
+      bar.classList.remove('hidden');
     }
 
     // Silent refetch for pull-to-refresh — no "Loading…" wipe.
@@ -2387,6 +2555,7 @@
       // The chrome just changed — keep the strip's anchor in step (renderHome
       // does the same). Cheap: a class toggle and a text write.
       renderStrip();
+      renderSyncBar();   // Home's bar; it goes away in the list view
       syncUndoChrome();
     }
 
@@ -3905,7 +4074,13 @@
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js')
           .then(reg => {
-            try { reg.update(); } catch (_) {}
+            // `update()` REJECTS when it cannot fetch /sw.js — which is every
+            // offline load, and is entirely expected there. A sync try/catch
+            // never sees that, so the rejection went unhandled and the browser
+            // logged "ServiceWorker script load failed" as a console error: an
+            // alarming message for normal behaviour, and one the platform's
+            // baseline "loads with no console errors" check would fail on.
+            reg.update().catch(() => { /* offline, or the script is unchanged */ });
             // Keep the offline fallback in step with deploys that change only
             // the shell (sw.js unchanged means no activate pass).
             const worker = reg.active || navigator.serviceWorker.controller;
