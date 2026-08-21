@@ -888,7 +888,21 @@ app.delete('/api/items/:id', async (req, res) => {
 // index:false so `/` falls through to the auth-aware catch-all below —
 // otherwise the static middleware hands the app shell to logged-out
 // visitors, whose first API call then dies with "Not authenticated".
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+// `no-cache, must-revalidate` is NOT "don't cache" — it means "revalidate
+// before reuse". The service worker refreshes the shell in the background on
+// every load, and without this the browser's heuristic caching decides on its
+// own how long to reuse these files. With it, that refresh is a conditional
+// GET that comes back 304 when nothing changed: a round trip instead of a
+// 200 KB download, which is the difference that matters on a weak signal.
+// See docs/app-slow-network-loading.md in the platform repo.
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false,
+  setHeaders: (res, filePath) => {
+    if (/\.(?:html|js|css|webmanifest)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  },
+}));
 
 // Browsers request /favicon.ico unconditionally (no token attached). Without
 // this route it falls through to the auth-gated catch-all below and logs a
@@ -901,6 +915,10 @@ app.get('/favicon.ico', (_req, res) => {
 // landing page — a live, client-side-only demo list whose items pitch the
 // platform (spec §6.10). No app data is ever served to it.
 app.get('*', (req, res) => {
+  // sendFile bypasses the express.static handler above, so the revalidation
+  // header has to be set here too — and this is the path that matters most,
+  // because it is the one the app itself is loaded from.
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   if (!req.user) {
     return res.sendFile(path.join(__dirname, 'public', 'landing.html'));
   }

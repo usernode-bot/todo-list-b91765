@@ -172,11 +172,34 @@ self.addEventListener('fetch', event => {
   if (sameOrigin && (url.pathname.startsWith('/api/') || url.pathname === '/health')) return;
   if (req.headers.get('accept') === 'text/event-stream') return;
 
-  // Navigations: network-first so an online logged-out visitor still gets the
-  // landing page, with the precached shell as the offline fallback. The
-  // navigation response is never written to the cache.
+  // Navigations. CACHE-FIRST for an in-app load, network-first otherwise.
+  //
+  // Cache-first is the whole slow-network fix (docs/app-slow-network-loading.md):
+  // a weak signal never FAILS, it crawls, so network-first holds a blank screen
+  // for as long as the connection wants — which is why this app is quick on
+  // wifi, quick offline, and painful in between. Offline is fast only because
+  // failure is fast.
+  //
+  // It is conditional because `/` on this origin is polymorphic: the public
+  // landing page for a logged-out visitor, the app for an authenticated one
+  // (see the catch-all in server.js). A blanket cache-first would serve the
+  // app shell to someone who should be seeing the landing page, on any device
+  // that had ever opened the app. The platform's iframe always carries
+  // `?token=` when online — which is precisely the load that has to be fast on
+  // a weak signal — so that flag is the tell, and a token-less navigation
+  // keeps exactly the behaviour it has today.
+  //
+  // The background refresh goes through refreshShell(), which re-fetches the
+  // token-less /index.html: nothing token-bearing is ever written to a cache.
   if (req.mode === 'navigate') {
     event.respondWith((async () => {
+      if (url.searchParams.has('token')) {
+        const shell = await caches.match(SHELL_URL, { cacheName: SHELL_CACHE });
+        if (shell) {
+          event.waitUntil(refreshShell());
+          return shell;
+        }
+      }
       try {
         return await fetch(req);
       } catch (_) {
