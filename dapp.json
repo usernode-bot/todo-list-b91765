@@ -152,7 +152,7 @@
       "name": "The offline and storage read-out renders",
       "path": "/?shot=diag",
       "expectSelector": ".un-modal.modal-narrow .modal-card #diag-body",
-      "expectText": "Saved for offline"
+      "expectText": "Home copy saved"
     },
     {
       "name": "A device that refuses offline storage gets honest strip copy",
