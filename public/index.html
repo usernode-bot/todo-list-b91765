@@ -97,6 +97,18 @@
   <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
   <link rel="stylesheet" href="/theme.css">
   <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
+  <!-- usernode-bridge — centrally hosted, never vendored. This app used no
+       bridge API, so it shipped without the tag; it needs it now for one
+       thing it cannot do for itself. The shell cannot see into this origin,
+       so offline it used to refuse to mount ANY app frame and showed "This
+       app needs a connection — reconnect to open it." — this app's whole
+       offline layer below (precached shell, saved copy, queued changes)
+       included, because the document that would have used it was never
+       requested. The bridge tells the shell the one fact that changes that:
+       a service worker is controlling this document, so a reload with no
+       network is served from /sw.js's cache. Loading it also gives the app
+       the rest of the platform API for free. -->
+  <script src="https://social-vibecoding.usernodelabs.org/usernode-bridge/v1/bridge.js"></script>
   <style>
     /* The brand palette, --un-* kit overrides, Fraunces title rule, .tinted
        and the .todo-check checkbox live in /theme.css — shared with the
@@ -1593,6 +1605,30 @@
       return loadList(lists[0].id);
     }
 
+    // Which list a shot opens must be chosen by SHAPE, never by position.
+    // seedDemoListFor writes every demo list inside one transaction, and
+    // Postgres NOW() is the transaction timestamp, so they all share a
+    // created_at — whichever sorts first is an accident of the tiebreaker.
+    // Today that is "Demo: Due Dates", whose only category is the default
+    // bucket, so a shot that needs a real category found none and rendered
+    // nothing. loadShotEmpty above already picks this way; this is the same
+    // scan, factored out for the two loaders that needed it.
+    async function firstListWhere(lists, wanted) {
+      for (const l of lists) {
+        let d = null;
+        try { d = await api('/api/lists/' + l.id); } catch (_) {}
+        if (d && wanted(d)) return l.id;
+      }
+      return lists[0].id;
+    }
+
+    // True when `cat` in payload `d` has items and every one of them is ticked
+    // — isCatFullyDone's question, asked of a list we haven't opened yet.
+    function catDoneIn(d, cat) {
+      const items = d.items.filter(i => i.category_id === cat.id);
+      return items.length > 0 && items.every(i => i.checked);
+    }
+
     // Screenshot-state deep link — `/?shot=collapsed` opens a list with its
     // first real category collapsed. Collapsing takes a tap, and the capture
     // harness can only navigate. Pure UI state: it flips the same local
@@ -1601,7 +1637,8 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && d.items.some(i => i.category_id === c.id))));
       if (!current) return;
       // Prefer a category with items and none of them ticked — the case the
       // old chevron couldn't do anything with, and the point of the change.
@@ -1622,7 +1659,8 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && catDoneIn(d, c))));
       if (!current) return;
       const target = current.categories.find(c => !c.is_default && isCatFullyDone(c.id));
       if (!target) return;
