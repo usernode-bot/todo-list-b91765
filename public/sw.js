@@ -14,11 +14,12 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-// v5: the shell's reorder rules changed (issue #51 — a category holding a
-// single item can be dragged into again). The bump is what makes that reach
-// people who already have the app installed: activate drops the v4 caches, so
-// no returning user keeps running the old shell out of cache.
-const CACHE_VERSION = 'todo-v5';
+// v6: the hosted kit, Tailwind and the bridge are precached up front now
+// (HOSTED_PRECACHE below) instead of only as a side effect of an online load.
+// The bump is what makes that reach people who already have the app installed:
+// activate drops the v5 caches, so the next install runs the new precache
+// rather than inheriting a warm-by-accident asset cache.
+const CACHE_VERSION = 'todo-v6';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -38,16 +39,66 @@ const PRECACHE = [SHELL_URL, '/theme.css', '/favicon.svg'];
 // accident; anything not named here goes straight to the network.
 const CACHEABLE_PATHS = new Set([SHELL_URL, '/theme.css', '/favicon.svg', '/landing.html']);
 
+// The platform's own origin — the bridge, the native kit and Tailwind all
+// come from here, and none of them is ever vendored into this repository.
+const HOSTED_ORIGIN = 'https://social-vibecoding.usernodelabs.org';
+
 // Cross-origin hosts whose assets are worth keeping for an offline load. Kept
 // deliberately tight: opaque cross-origin entries are padded heavily against
 // the storage quota.
 const ASSET_HOSTS = [
-  // Tailwind now comes from the platform origin below, which is already
-  // listed — so the offline copy of it is still cached, under that host.
+  // Tailwind comes from the platform origin, which is already listed — so the
+  // offline copy of it is still cached, under that host.
   'fonts.googleapis.com',
   'fonts.gstatic.com',
   'social-vibecoding.usernodelabs.org',
 ];
+
+// The three centrally hosted files every Usernode app loads, plus the kit's
+// JS. Cached UP FRONT at install rather than only as a side effect of an
+// online load, because the load that needs them most is the offline one — and
+// an install whose first run went offline before any of them had been fetched
+// left the shell with no stylesheet at all, which is what painted the offline
+// screen in browser-default white.
+//
+// This is caching, not vendoring: nothing is copied into the repository, the
+// URLs stay the platform's, and every entry is still revalidated against the
+// host on each online load, so fleet-wide kit fixes propagate exactly as
+// before.
+const HOSTED_PRECACHE = [
+  HOSTED_ORIGIN + '/usernode-native/v1/native.css',
+  HOSTED_ORIGIN + '/usernode-native/v1/native.js',
+  HOSTED_ORIGIN + '/usernode-tailwind/v1/tailwind.js',
+  HOSTED_ORIGIN + '/usernode-bridge/v1/bridge.js',
+];
+
+// A deadline for that batch. Install must not be held open by a host this
+// network cannot reach: a container behind a firewall, a captive portal, or a
+// first run that is simply offline would otherwise keep the worker installing
+// until the browser's own fetch timeout. Whatever the deadline cuts off is
+// picked up by the fetch handler on the next online load, exactly as before.
+const HOSTED_PRECACHE_MS = 6000;
+
+// Fetched no-cors, the same way the <script> and <link> tags themselves fetch
+// them, so the opaque responses stored here match the requests the page makes
+// later. Opaque entries are padded heavily against the storage quota, which is
+// why this list is four files and not a wildcard.
+async function precacheHosted() {
+  const cache = await caches.open(ASSET_CACHE);
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), HOSTED_PRECACHE_MS) : null;
+  try {
+    await Promise.all(HOSTED_PRECACHE.map(async url => {
+      try {
+        const req = new Request(url, { mode: 'no-cors' });
+        const res = await fetch(req, ctl ? { signal: ctl.signal } : undefined);
+        if (res && (res.ok || res.type === 'opaque')) await cache.put(url, res.clone());
+      } catch (_) { /* unreachable or past the deadline — filled in later */ }
+    }));
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
@@ -61,6 +112,10 @@ self.addEventListener('install', event => {
       } catch (_) { /* stays uncached; the fetch handler fills it later */ }
     }));
     await self.skipWaiting();
+    // After skipWaiting, so taking over the page is never gated on a
+    // cross-origin fetch; still inside waitUntil, so the worker stays alive
+    // until it finishes or HOSTED_PRECACHE_MS cuts it off.
+    await precacheHosted();
   })());
 });
 

@@ -171,6 +171,18 @@
       "path": "/?shot=nocache",
       "expectSelector": "#offline-chip:not(.hidden)",
       "expectText": "nothing saved on this device yet"
+    },
+    {
+      "name": "Home reports the background pass that saves every list for offline",
+      "path": "/?shot=saving",
+      "expectSelector": "#prefetch-bar:not(.hidden) #prefetch-fill",
+      "expectText": "Saving lists for offline… 2 of 5"
+    },
+    {
+      "name": "...and confirms it when every list is saved",
+      "path": "/?shot=saved",
+      "expectSelector": "#prefetch-bar.done:not(.hidden)",
+      "expectText": "All lists saved for offline"
     }
   ],
   "visibility": {

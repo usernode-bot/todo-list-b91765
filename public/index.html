@@ -115,6 +115,25 @@
        logged-out landing page so the two can't drift. Only app-specific
        styles belong below. */
     html { overscroll-behavior-y: contain; }
+
+    /* Every colour in this app — body's own background included — comes from
+       /theme.css, so a load that could not fetch that stylesheet has no --bg
+       to paint with and lands on the user agent's default white. The load
+       where that is most likely is the offline one this whole layer exists
+       for, which is why an offline boot rendered in light mode however the
+       theme was set.
+       color-scheme is the one paint instruction that needs no stylesheet: it
+       tells the UA which canvas to draw underneath us. Declared here, in the
+       document's own <style>, because a rule inside theme.css cannot help the
+       load where theme.css is the thing that is missing — and keyed off the
+       same .dark class the palette is, so the two can never disagree.
+       Deliberately NOT `light dark`: that resolves against the SYSTEM
+       preference, which is exactly the wrong answer for someone who picked a
+       theme their system disagrees with — it would paint their dark app on a
+       light canvas and their light app on a dark one. */
+    :root { color-scheme: light; }
+    :root.dark { color-scheme: dark; }
+
     .surface { background: var(--card); }
     .btn-primary { background: var(--tint); color: #fff; }
     .btn-primary:hover { background: var(--tint-deep); }
@@ -147,6 +166,42 @@
     body.no-navbar #offline-chip { top: env(safe-area-inset-top); }
     /* Make room so the strip never covers the first row of content. */
     body.has-strip #app { padding-top: 2.15rem; }
+
+    /* Progress of the background pass that saves every list for offline.
+       Pinned to the BOTTOM on purpose: the status strip above owns the top,
+       directly under the nav bar, and a second bar stacked up there would
+       push the first row of My Lists off the screen for the whole pass.
+       #app already carries pb-24, so nothing is covered down here. */
+    #prefetch-bar {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      display: flex; align-items: center; justify-content: center;
+      padding: 7px 14px calc(7px + env(safe-area-inset-bottom));
+      background: var(--card); color: var(--label2);
+      font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+      text-align: center; z-index: 60; pointer-events: none;
+      border-top: 1px solid var(--separator);
+      box-shadow: 0 -2px 10px rgba(0, 0, 0, .12);
+      overflow: hidden;
+    }
+    /* Own the hidden rule rather than leaning on Tailwind's .hidden — same
+       reason #offline-chip does: the hosted script may not be warm on the
+       very first offline load. */
+    #prefetch-bar.hidden { display: none; }
+    /* The fill is a neutral wash rather than the accent, because the label
+       sits ON it: teal-under-white would be legible on the filled side of the
+       bar and nowhere else. */
+    #prefetch-fill {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+      background: var(--fill2); transition: width .35s ease;
+    }
+    #prefetch-label { position: relative; }
+    /* The one moment it earns colour: the pass is done and the bar is about
+       to remove itself. Matches #offline-chip.ok. */
+    #prefetch-bar.done {
+      background: var(--tint); color: #fff; border-top-color: var(--tint);
+    }
+    #prefetch-bar.done #prefetch-fill { background: transparent; }
+    @media (prefers-reduced-motion: reduce) { #prefetch-fill { transition: none } }
 
     /* First-load placeholders. Only ever drawn when there is no saved copy of
        the screen to paint, so content lands into the same shape instead of
@@ -306,6 +361,11 @@
 <body class="min-h-screen">
   <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
   <div id="offline-chip" class="hidden" role="status" aria-live="polite" onclick="onStripTap()"></div>
+  <div id="prefetch-bar" class="hidden" role="progressbar"
+       aria-label="Saving lists for offline" aria-valuemin="0">
+    <div id="prefetch-fill"></div>
+    <span id="prefetch-label"></span>
+  </div>
 
   <script>
     // --- auth / api ----------------------------------------------------------
@@ -353,6 +413,15 @@
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
     const shotNostore = shot === 'nostore';
+    // Screenshot/test deep links for the state this change introduces: the
+    // bottom bar that reports the background offline pass, mid-run
+    // (?shot=saving) and on the confirmation it finishes with (?shot=saved).
+    // The bar exists only while Home is pulling the rest of the lists in —
+    // a few seconds on a first load and then never again — so no navigation
+    // can reach either. Display-only: they paint the bar over a normal Home
+    // and run no pass, fetch nothing extra and write nothing.
+    const shotSaving = shot === 'saving';
+    const shotSaved = shot === 'saved';
     // Screenshot/test deep link for the state this change introduces: a
     // finished category expanded to show the lane a dragged row now lands on
     // (?shot=drop). Finished categories start shut and dragging is a gesture,
@@ -596,11 +665,44 @@
     }
     function cacheGet(key) { try { return JSON.parse(rawGet(key)); } catch (_) { return null; } }
 
-    // A write that must not be lost (the queue) evicts cached list payloads
-    // oldest-first — never the list on screen — and retries after each one.
+    // Lists the BACKGROUND pass saved (newest first), tracked apart from the
+    // opened-lists LRU. Keeping the two sets separate is the whole point: a
+    // list the user actually opened must never be evicted to make room for one
+    // the app pulled in on its own, and it is the two together that the
+    // MAX_CACHED_LISTS cap applies to.
+    const PREFETCH_KEY = NS + 'cache:prefetched';
+    const openedIds = () => (cacheGet(LRU_KEY) || []).map(String);
+    const prefetchedIds = () => (cacheGet(PREFETCH_KEY) || []).map(String);
+    // How many background-saved lists fit beside the ones the user opened.
+    const prefetchRoom = opened => Math.max(0, MAX_CACHED_LISTS - (opened || openedIds()).length);
+
+    // Trim the background set to whatever room the opened lists leave it, and
+    // forget any entry that has since been opened — that payload belongs to
+    // the LRU now, and dropping it here would delete a list the user has open.
+    function prunePrefetched(opened) {
+      const mine = opened || openedIds();
+      const owned = new Set(mine);
+      const pre = prefetchedIds().filter(id => !owned.has(id));
+      const room = prefetchRoom(mine);
+      for (const stale of pre.slice(room)) rawRemove(listKey(stale));
+      cacheSet(PREFETCH_KEY, pre.slice(0, room));
+    }
+
+    // A write that must not be lost (the queue) evicts cached list payloads to
+    // make room and retries after each one. Background-saved lists go first —
+    // they cost nothing to lose, the next Home load pulls them again — then the
+    // opened-lists LRU oldest-first, and never the list on screen.
     function cacheSetOrEvict(key, val) {
       if (cacheSet(key, val)) return true;
       const keepId = current ? String(current.list.id) : null;
+      const pre = prefetchedIds();
+      for (let i = pre.length - 1; i >= 0; i--) {
+        if (pre[i] === keepId) continue;
+        rawRemove(listKey(pre[i]));
+        pre.splice(i, 1);
+        cacheSet(PREFETCH_KEY, pre);
+        if (cacheSet(key, val)) return true;
+      }
       const lru = cacheGet(LRU_KEY) || [];
       for (let i = lru.length - 1; i >= 0; i--) {
         const id = String(lru[i]);
@@ -618,12 +720,36 @@
     // and the MAX_CACHED_LISTS cap consume.
     function touchList(id) {
       const key = String(id);
-      const lru = [key, ...(cacheGet(LRU_KEY) || []).filter(x => String(x) !== key)];
+      const lru = [key, ...openedIds().filter(x => x !== key)];
       for (const stale of lru.slice(MAX_CACHED_LISTS)) {
         rawRemove(listKey(stale));
       }
-      cacheSet(LRU_KEY, lru.slice(0, MAX_CACHED_LISTS));
+      const kept = lru.slice(0, MAX_CACHED_LISTS);
+      cacheSet(LRU_KEY, kept);
+      // Opening a list outranks every background-saved one, so it is the
+      // background set that gives up the room, not the cap that stretches.
+      prunePrefetched(kept);
     }
+
+    // Save a background copy of a list. Deliberately plain `cacheSet` and not
+    // `cacheSetOrEvict`: a prefetch that doesn't fit simply doesn't happen. It
+    // must never be able to push out the mutation queue, the Home copy, or a
+    // list the user opened. Returns false when it was skipped.
+    function savePrefetched(id, data) {
+      const key = String(id);
+      const opened = openedIds();
+      // Already the LRU's — refresh the payload in place and spend no room.
+      if (opened.includes(key)) return cacheSet(listKey(key), data);
+      if (prefetchRoom(opened) <= 0) return false;
+      if (!cacheSet(listKey(key), data)) return false;
+      cacheSet(PREFETCH_KEY, [key, ...prefetchedIds().filter(x => x !== key)]);
+      prunePrefetched(opened);
+      return true;
+    }
+
+    // Every list this device holds a copy of, opened or saved in the
+    // background — what the read-out means by "lists saved offline".
+    const cachedListCount = () => new Set([...openedIds(), ...prefetchedIds()]).size;
 
     function cacheList() {
       if (!current) return;
@@ -785,6 +911,9 @@
       // Keep the strip's anchor in step with whether a nav bar is on screen.
       document.body.classList.toggle('no-navbar', !document.querySelector('.un-navbar'));
       if (!chip) return;
+      // The other bar this app pins to a screen edge tracks the same
+      // navigations, so it re-evaluates on the same beat.
+      renderPrefetchBar();
       if (!st) {
         chip.classList.add('hidden');
         chip.classList.remove('tappable', 'ok');
@@ -1517,6 +1646,7 @@
       else if (shotCollapsed) loadShotCollapsed();
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
+      else if (shotSaving || shotSaved) loadShotSaving();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -1818,6 +1948,11 @@
         return;
       }
       if (seq !== loadSeq || current) return; // navigated away mid-fetch
+      // Home is live — now save the lists themselves behind it. Kicked off
+      // BEFORE the repaint short-circuit below: whether the payload happens to
+      // match what was already on screen says nothing about whether the lists
+      // it names have ever been saved.
+      maybePrefetchLists(lists);
       // Identical to what's already painted: leave the DOM (and the scroll
       // position) alone.
       if (cached && JSON.stringify(cached) === JSON.stringify(lists)) return;
@@ -1933,11 +2068,144 @@
       try {
         const { lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS });
         cacheSet(HOME_KEY, lists);
+        maybePrefetchLists(lists); // a pull down is also the retry for a pass that stopped
         if (current) return; // navigated into a list mid-fetch
         renderHome(lists);
       } catch (e) {
         if (!e.network) toast(e.message);
       }
+    }
+
+    // --- saving every list for offline ----------------------------------------
+    // Opening a list used to be the ONLY thing that saved it. So an offline
+    // Home painted perfectly from its saved copy and then every row on it led
+    // to "This list isn't available offline" — the screen promised something
+    // the app could not do. Home now pulls the rest in behind itself:
+    //   · one list at a time, so the pass never competes with a tap for the
+    //     connection (and never opens N requests on a phone link),
+    //   · never while offline, and it stops the moment the connection goes,
+    //   · never evicting a list the user actually opened (see savePrefetched),
+    //   · bounded by the same MAX_CACHED_LISTS cap as everything else.
+    let prefetchRun = 0;          // bumped to cancel a pass still in flight
+    let prefetchAllSaved = false; // a pass got through every list this session
+    let prefetchState = null;     // null | { done, total, finished } — the bar
+    let prefetchHideTimer = null;
+
+    function setPrefetchState(st) {
+      prefetchState = st;
+      clearTimeout(prefetchHideTimer);
+      prefetchHideTimer = null;
+      // "All lists saved for offline" is a confirmation, not a fixture: it
+      // says its piece and then takes the bar away with it.
+      if (st && st.finished && !shot) {
+        prefetchHideTimer = setTimeout(() => setPrefetchState(null), 2000);
+      }
+      renderPrefetchBar();
+    }
+
+    // Which lists this pass will pull, in Home's own order. A list already in
+    // the opened LRU is refreshed in place and costs no room; the rest fill
+    // whatever the cap leaves over.
+    function prefetchTargets(lists) {
+      const opened = openedIds();
+      const owned = new Set(opened);
+      let room = prefetchRoom(opened);
+      const out = [];
+      for (const l of lists) {
+        const id = String(l.id);
+        if (owned.has(id)) { out.push(id); continue; }
+        if (room <= 0) continue;
+        room--;
+        out.push(id);
+      }
+      return out;
+    }
+
+    async function prefetchLists(lists) {
+      const run = ++prefetchRun;
+      const targets = prefetchTargets(lists);
+      if (!targets.length) { prefetchAllSaved = true; setPrefetchState(null); return; }
+      // `done` is what the bar counts — lists dealt with, so it keeps moving
+      // past one that can't be read. `saved` is what actually reached storage,
+      // and it is the only thing that earns the confirmation.
+      let done = 0, saved = 0;
+      setPrefetchState({ done, total: targets.length });
+      for (const id of targets) {
+        if (run !== prefetchRun) return;                       // a newer pass took over
+        if (!isOnline()) { setPrefetchState(null); return; }   // skipped while offline
+        try {
+          if (savePrefetched(id, await api('/api/lists/' + id, { timeoutMs: LOAD_TIMEOUT_MS }))) saved++;
+        } catch (e) {
+          if (run !== prefetchRun) return;
+          // The connection went mid-pass: stop, rather than grind through the
+          // rest failing one by one. The next Home load picks it back up.
+          if (e.network) { setPrefetchState(null); return; }
+          // One list we're no longer allowed to read (deleted, un-shared)
+          // must not stop the ones queued behind it.
+        }
+        if (run !== prefetchRun) return;
+        setPrefetchState({ done: ++done, total: targets.length });
+      }
+      // The pass RAN to the end either way, so it doesn't run again this
+      // session — a list that 403s would otherwise re-pull every list behind
+      // it on every trip back to Home.
+      prefetchAllSaved = true;
+      // But only say "All lists saved" when all of them are. A partial pass
+      // just takes the bar away: the Offline & storage read-out carries the
+      // real count, and this app does not get to promise a copy it lacks.
+      setPrefetchState(saved === targets.length
+        ? { done, total: targets.length, finished: true }
+        : null);
+    }
+
+    // Runs once per session, and again after a pass that didn't finish (the
+    // usual reason being that the connection went). Home is where every
+    // "‹ My Lists" tap lands, and re-pulling every list on each of them would
+    // be a burst of requests for copies this device already has.
+    function maybePrefetchLists(lists) {
+      if (shot) return;                          // display-only screenshot states
+      if (prefetchAllSaved) return;
+      if (!Array.isArray(lists) || !lists.length) return;
+      if (!isOnline()) return;                   // skipped while offline
+      prefetchLists(lists);
+    }
+
+    // Screenshot-state deep link — see shotSaving. Paints Home normally, then
+    // forces the bar into a fixed, capturable position on the pass. The
+    // auto-hide that follows the confirmation is skipped under any ?shot, so
+    // ?shot=saved doesn't race the capture.
+    async function loadShotSaving() {
+      await loadHome();
+      setPrefetchState(shotSaved
+        ? { done: 5, total: 5, finished: true }
+        : { done: 2, total: 5 });
+    }
+
+    // The bar itself. Lives outside #app (like the status strip) so a screen
+    // re-render never touches it, and it is a progressbar rather than a live
+    // region — a polite announcement per list would be six interruptions for
+    // a screen-reader user, for something they did not ask for.
+    function renderPrefetchBar() {
+      const bar = document.getElementById('prefetch-bar');
+      if (!bar) return;
+      const st = prefetchState;
+      // Home only. `current` is null exactly when Home is what's on screen,
+      // and a list screen has its own business at the bottom of the viewport.
+      const show = !!(st && st.total && !current);
+      bar.classList.toggle('hidden', !show);
+      if (!show) return;
+      const done = Math.min(st.done, st.total);
+      const text = st.finished
+        ? 'All lists saved for offline'
+        : 'Saving lists for offline… ' + done + ' of ' + st.total;
+      const fill = document.getElementById('prefetch-fill');
+      const label = document.getElementById('prefetch-label');
+      if (fill) fill.style.width = Math.round((done / st.total) * 100) + '%';
+      if (label) label.textContent = text;
+      bar.classList.toggle('done', !!st.finished);
+      bar.setAttribute('aria-valuenow', String(done));
+      bar.setAttribute('aria-valuemax', String(st.total));
+      bar.setAttribute('aria-valuetext', text);
     }
 
     async function newList(btn) {
@@ -3493,7 +3761,9 @@
       if (diagModal) diagModal.dismiss();
       const el = document.createElement('div');
       el.className = 'flex flex-col gap-2';
-      const savedLists = (cacheGet(LRU_KEY) || []).length;
+      // Opened AND background-saved: the read-out would otherwise under-report
+      // by exactly the lists the new pass saved.
+      const savedLists = cachedListCount();
       const queued = queueLength();
       el.innerHTML = `
         <div class="flex items-center justify-between gap-2">
@@ -3905,7 +4175,18 @@
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js')
           .then(reg => {
-            try { reg.update(); } catch (_) {}
+            // reg.update() REJECTS whenever /sw.js can't be re-fetched, which
+            // is EVERY offline load — the most expected thing this app does.
+            // It was wrapped in a synchronous try/catch, which a rejected
+            // promise walks straight past, so the browser logged an unhandled
+            // "script load failed" error for entirely correct behaviour (and
+            // the platform's baseline check counts console errors). The
+            // try/catch stays for the synchronous throw; .catch() is what
+            // actually covers the offline case.
+            try {
+              const updating = reg.update();
+              if (updating && updating.catch) updating.catch(() => {});
+            } catch (_) {}
             // Keep the offline fallback in step with deploys that change only
             // the shell (sw.js unchanged means no activate pass).
             const worker = reg.active || navigator.serviceWorker.controller;
