@@ -565,6 +565,32 @@
       } catch (_) { /* storage full mid-sweep — the app still runs */ }
     })();
 
+    // A census taken ONCE, before this load writes anything. It is the only
+    // way to tell three failure modes apart from the outside, and they need
+    // completely different fixes:
+    //   ours = 0        storage did not survive the last session at all
+    //   ours > 0, mine = 0   it survived, but this load is looking under a
+    //                        different namespace than the one that wrote it
+    //   mine > 0, no home    it is there and we simply never saved Home
+    // Read by the Offline & storage read-out; costs one pass at boot.
+    const BOOT_STORAGE = (function census() {
+      const out = { ours: 0, mine: 0 };
+      if (!DURABLE) return out;
+      try {
+        for (const k of Object.keys(localStorage)) {
+          if (k.indexOf('todo:') !== 0) continue;
+          out.ours++;
+          if (k.indexOf(NS) === 0) out.mine++;
+        }
+      } catch (_) { /* enumeration denied — leave the zeros */ }
+      return out;
+    })();
+
+    // Set when a save of the Home copy was ATTEMPTED and refused (quota, or a
+    // storage that accepts the probe and rejects real writes). Without this a
+    // failed save is indistinguishable from one that never happened.
+    let homeSaveFailed = false;
+
     function cacheSet(key, val) {
       return rawSet(key, JSON.stringify(val));
     }
@@ -1773,7 +1799,10 @@
       try {
         ({ lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS }));
         lists = await maybeImportLandingList(lists);
-        cacheSet(HOME_KEY, lists);
+        // Was `cacheSet`, whose false return nobody read — so a refused write
+        // left the app believing it had a saved copy it did not have. Evicting
+        // and retrying is what the queue already does for the same reason.
+        homeSaveFailed = !cacheSetOrEvict(HOME_KEY, lists);
         showingSaved = false;
       } catch (e) {
         if (seq !== loadSeq || current) return;
@@ -3436,6 +3465,29 @@
               </div>`;
     }
 
+    // The rows that answer "why is there no saved copy?" — see BOOT_STORAGE.
+    // Deliberately concrete: a yes/no plus the namespace, because "storage is
+    // available" was already on this card and was true in the one case that
+    // mattered while nothing had actually persisted.
+    function diagStorageRows() {
+      const home = cacheGet(HOME_KEY);
+      const homeLabel = homeSaveFailed ? "couldn't save — storage refused it"
+        : Array.isArray(home) ? home.length + (home.length === 1 ? ' list' : ' lists')
+        : 'not saved yet';
+      const who = HAVE_TOKEN_IDENTITY ? "this session's sign-in"
+        : identity ? 'remembered from a previous visit'
+        : 'unknown — nothing remembered';
+      return [
+        diagRow('Home copy saved', homeLabel),
+        diagRow('Saved under', (identity && identity.id != null ? 'user ' + identity.id : 'no account') ),
+        diagRow('Identity from', who),
+        diagRow('App data found at start', BOOT_STORAGE.ours
+          ? BOOT_STORAGE.ours + ' item' + (BOOT_STORAGE.ours === 1 ? '' : 's')
+            + ' (' + BOOT_STORAGE.mine + ' for this account)'
+          : 'none — nothing survived from last time'),
+      ].join('');
+    }
+
     async function openDiagnostics() {
       if (!window.unNative) { toast('This needs the UI kit, which failed to load'); return; }
       if (diagModal) diagModal.dismiss();
@@ -3452,6 +3504,7 @@
           ${diagRow('Saved for offline', 'checking…')}
           ${diagRow('Background updater', 'checking…')}
           ${diagRow('Storage on this device', DURABLE ? 'available' : 'not allowed — this session only')}
+          ${diagStorageRows()}
           ${diagRow('Lists saved offline', String(savedLists))}
           ${diagRow('Changes waiting to sync', String(queued))}
           ${diagRow('Last successful sync', agoLabel(lastSyncAt))}
@@ -3472,6 +3525,7 @@
         diagRow('Saved for offline', shell),
         diagRow('Background updater', sw),
         diagRow('Storage on this device', DURABLE ? 'available' : 'not allowed — this session only'),
+        diagStorageRows(),
         diagRow('Lists saved offline', String(savedLists)),
         diagRow('Changes waiting to sync', String(queued)),
         diagRow('Last successful sync', agoLabel(lastSyncAt)),
