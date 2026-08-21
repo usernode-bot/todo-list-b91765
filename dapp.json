@@ -179,6 +179,18 @@
       "expectText": "10 are already saved"
     },
     {
+      "name": "A pass that only brings saved copies up to date says so",
+      "path": "/?shot=syncrefresh",
+      "expectSelector": "#sync-bar:not(.hidden) .sync-track .sync-fill",
+      "expectText": "Updating saved lists… 1 of 3"
+    },
+    {
+      "name": "...and confirms the saved copies are current, not newly saved",
+      "path": "/?shot=syncfresh",
+      "expectSelector": "#sync-bar:not(.hidden) .sync-fill",
+      "expectText": "Saved lists are up to date"
+    },
+    {
       "name": "An offline boot with nothing saved keeps the app's chrome and explains itself",
       "path": "/?shot=nocache",
       "expectSelector": "body.is-offline #app header#home-bar ~ div button",

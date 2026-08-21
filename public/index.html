@@ -392,7 +392,12 @@
     // lists already saved on the device before it can appear at all, which no
     // navigation can arrange. All display-only: they never fetch, never write,
     // and the real pass stands down while they are on (see prefetchLists).
-    const shotSync = shot === 'syncbar' || shot === 'syncdone' || shot === 'synccap';
+    // `?shot=syncrefresh` / `?shot=syncfresh` are the pass that had nothing
+    // MISSING to save and only brought already-saved copies up to date. Both
+    // need a device that has already saved every list and then waited for one
+    // to change, which no navigation can arrange.
+    const shotSync = shot === 'syncbar' || shot === 'syncdone' || shot === 'synccap'
+      || shot === 'syncrefresh' || shot === 'syncfresh';
     const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
@@ -712,6 +717,44 @@
     function forgetSaved(id) {
       const key = String(id);
       cacheSet(LRU_KEY, (cacheGet(LRU_KEY) || []).filter(x => String(x) !== key));
+    }
+
+    // What the server last said about each saved copy: `{ at, fp }` — when it
+    // was read, and a fingerprint of what came back.
+    //
+    // In its own key rather than inside the payload, because loadList compares
+    // JSON.stringify(the saved copy) against a fresh fetch to decide whether
+    // to repaint — a stamp carried in the payload would make every one of
+    // those comparisons differ and repaint the screen for nothing.
+    //
+    // Holding `fp` here rather than deriving it from the payload is what keeps
+    // the staleness check below off the hot path: the alternative reads and
+    // parses every saved list on every single Home load, and Home is the
+    // screen this app works hardest to paint quickly.
+    //
+    // Written where server data lands (loadList, refreshList, the background
+    // pass) — NOT in cacheList, which also runs on every local toggle and
+    // edit. A local change does not make a copy any fresher than the server,
+    // and recording it as if it did is exactly what would let a stale list
+    // hide behind its own edits.
+    const SAVED_AT_KEY = NS + 'cache:saved-at';
+    function savedAtMap() {
+      const m = cacheGet(SAVED_AT_KEY);
+      return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+    }
+    // Self-pruning: every write drops entries for lists the LRU no longer
+    // holds, so this map can never outgrow MAX_CACHED_LISTS or outlive the
+    // payloads it describes.
+    //
+    // `payload` must be what the SERVER returned, not the copy with unsent
+    // changes projected onto it: this records what the server last said.
+    function stampFetched(id, payload) {
+      const known = new Set((cacheGet(LRU_KEY) || []).map(String));
+      const prev = savedAtMap();
+      const next = {};
+      for (const k of Object.keys(prev)) if (known.has(k)) next[k] = prev[k];
+      next[String(id)] = { at: Date.now(), fp: savedFingerprint(payload) };
+      cacheSet(SAVED_AT_KEY, next);
     }
 
     function cacheList() {
@@ -2050,6 +2093,44 @@
     let syncSeq = 0;
     let syncHideTimer = null;
 
+    // How old a saved copy may be before the pass re-reads it, and how many
+    // aged-out copies one pass will re-read. The age fallback only exists to
+    // catch edits the counts CANNOT see (an item's text corrected, a reorder,
+    // a due date moved, a category renamed), so it is deliberately slow and
+    // deliberately capped: a device that has been away for a week refreshes a
+    // few lists per visit to Home rather than all ten at once.
+    const SAVED_COPY_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+    const MAX_AGED_REFRESHES_PER_PASS = 3;
+
+    // What Home already knows about a list, in the shape the saved copy can
+    // be asked for. Home's payload carries the name, the due-dates flag and
+    // both counts for every list, so most staleness is detectable with no
+    // request at all — and, just as importantly, NO request is made when
+    // nothing has changed.
+    //
+    // Blind to edits that leave the counts alone; that is what the age
+    // fallback above is for.
+    function homeFingerprint(row) {
+      return [
+        String(row.name == null ? '' : row.name),
+        row.due_dates_enabled ? 1 : 0,
+        Number(row.open_count) || 0,
+        Number(row.done_count) || 0,
+      ].join('\u0000');
+    }
+    function savedFingerprint(saved) {
+      const list = (saved && saved.list) || {};
+      const items = (saved && Array.isArray(saved.items)) ? saved.items : [];
+      let open = 0, done = 0;
+      for (const i of items) { if (i && i.checked) done++; else open++; }
+      return [
+        String(list.name == null ? '' : list.name),
+        list.due_dates_enabled ? 1 : 0,
+        open,
+        done,
+      ].join('\u0000');
+    }
+
     async function prefetchLists(lists) {
       const mySeq = ++syncSeq;
       clearTimeout(syncHideTimer);
@@ -2058,15 +2139,72 @@
       if (!DURABLE || !isOnline() || !Array.isArray(lists)) { renderSyncBar(); return; }
       const targets = lists.slice(0, MAX_CACHED_LISTS);
       const skipped = lists.length - targets.length;
-      const missing = targets.filter(l => !cacheGet(listKey(l.id)));
-      if (!missing.length) { renderSyncBar(); return; }
+      // What this device actually holds a copy of. The LRU and the payloads
+      // are kept in step (#62), so this answers "do we have it?" without
+      // parsing anything — which matters below, where the alternative would
+      // be a JSON.parse of every list on Home on every single Home load.
+      const held = new Set((cacheGet(LRU_KEY) || []).map(String));
+      const missing = targets.filter(l => !held.has(String(l.id)));
 
-      syncState = { done: 0, total: missing.length, skipped, failed: false };
+      // A saved copy used to be written once and never read again, so a list
+      // you saved and did not open went stale with no ceiling — worst on a
+      // shared list, where somebody else is the one changing it. Two ways back:
+      //
+      //   · the counts Home already returned disagree with the copy, which
+      //     means it is demonstrably out of date and costs nothing to notice;
+      //   · it simply has not been read from the server for a while, which is
+      //     the only way to catch an edit the counts cannot see.
+      //
+      // The count check stands down while anything is queued: a copy written
+      // by cacheList has the unsent changes already applied to it, so its
+      // counts are SUPPOSED to differ from the server's until the queue
+      // drains, and comparing them would refetch every list on every Home
+      // load until it did.
+      //
+      // Deliberately scanned over EVERY list on Home we hold a copy of, not
+      // just the top-of-Home window `targets` covers. A list can be pushed
+      // out of that window by newer ones while its copy stays saved on the
+      // device — and a copy we are still keeping is a copy worth keeping
+      // current. Bounded by the cap either way, since `held` is the LRU.
+      const stamps = savedAtMap();
+      const queued = queueLength() > 0;
+      const changed = [], aged = [];
+      for (const l of lists) {
+        if (!held.has(String(l.id))) continue;     // no copy — `missing` covers the window
+        const stamp = stamps[String(l.id)] || null;
+        // No stamp at all: a copy saved before this bookkeeping existed, so
+        // its age and contents are both unknown. Treat it as due rather than
+        // guess — the per-pass cap keeps that one-off migration gentle.
+        if (!stamp) { aged.push({ l, at: 0 }); continue; }
+        if (!queued && homeFingerprint(l) !== stamp.fp) { changed.push(l); continue; }
+        const at = Number(stamp.at) || 0;
+        if (Date.now() - at > SAVED_COPY_MAX_AGE_MS) aged.push({ l, at });
+      }
+      aged.sort((a, b) => a.at - b.at);            // oldest copy first
+      const refreshes = changed.concat(aged.slice(0, MAX_AGED_REFRESHES_PER_PASS).map(x => x.l));
+
+      // Missing first: having no copy of a list at all matters more than
+      // having a slightly old one.
+      const queue = missing.map(l => ({ l, refresh: false }))
+        .concat(refreshes.map(l => ({ l, refresh: true })));
+      if (!queue.length) { renderSyncBar(); return; }
+
+      syncState = {
+        done: 0, total: queue.length, skipped, failed: false,
+        // A pass with nothing missing is not "saving lists for offline" — they
+        // are already saved. Say what it is actually doing.
+        refreshOnly: !missing.length,
+      };
       renderSyncBar();
       let stoppedEarly = false, capped = false;
-      for (const l of missing) {
+      for (const t of queue) {
+        const l = t.l;
         if (mySeq !== syncSeq) return;            // a newer Home load owns this now
         if (!isOnline()) { stoppedEarly = true; break; }
+        // Out of room for another NEW list — but a refresh occupies a slot it
+        // already holds, so it still fits and should not be starved by a new
+        // list that doesn't.
+        if (capped && !t.refresh) continue;
         let d = null;
         try {
           d = await api('/api/lists/' + l.id, { timeoutMs: LOAD_TIMEOUT_MS });
@@ -2083,12 +2221,17 @@
         // have (touchList, cacheSetOrEvict) walks the LRU, so it could never
         // be reclaimed. One new list past the cap leaked one payload, on every
         // Home load, with no ceiling.
-        if (!rememberSaved(l.id)) { capped = true; break; }
+        // (A refresh is already in the LRU, so this returns true for one.)
+        if (!rememberSaved(l.id)) { capped = true; continue; }
         if (!cacheSet(listKey(l.id), d)) {
-          forgetSaved(l.id);
+          // Give back only a slot we just took. A refresh's slot was already
+          // there and still points at the OLDER payload — dropping the LRU
+          // entry here would strand that payload exactly as #62 fixed.
+          if (!t.refresh) forgetSaved(l.id);
           syncState.failed = true;
           break;
         }
+        stampFetched(l.id, d);
         syncState.done++;
         renderSyncBar();
       }
@@ -2116,17 +2259,23 @@
       // Display-only deep links, so the bar is capturable: neither writes.
       if (shot === 'syncbar') return { text: 'Saving lists for offline… 2 of 5', pct: 20 };
       if (shot === 'syncdone') return { text: 'All lists saved for offline', ok: true, pct: 100 };
+      if (shot === 'syncrefresh') return { text: 'Updating saved lists… 1 of 3', pct: 33 };
+      if (shot === 'syncfresh') return { text: 'Saved lists are up to date', ok: true, pct: 100 };
       if (shot === 'synccap') {
         return { text: plurLists(3) + " won't fit — " + MAX_CACHED_LISTS + ' are already saved', ok: true, pct: 100 };
       }
       if (current) return null;   // list view; the top strip speaks there
       if (!syncState) return null;
-      const { done, total, skipped, failed } = syncState;
+      const { done, total, skipped, failed, refreshOnly } = syncState;
       const pct = total ? Math.round((done / total) * 100) : 0;
       if (failed) {
         return { text: 'Saved ' + plurLists(done) + ' — not enough storage for the rest', pct };
       }
       if (done >= total) {
+        // Nothing was missing — every list was already saved and this pass only
+        // brought copies back up to date. Claiming they were just "saved for
+        // offline" would overstate what happened.
+        if (refreshOnly && !skipped) return { text: 'Saved lists are up to date', ok: true, pct: 100 };
         if (!skipped) return { text: 'All lists saved for offline', ok: true, pct: 100 };
         // "Saved 0 lists for offline" reads as a failure when nothing was left
         // to do: say what is actually true, which is that the cap is full.
@@ -2135,7 +2284,11 @@
             : plurLists(skipped) + " won't fit — " + MAX_CACHED_LISTS + ' are already saved',
           ok: true, pct: 100 };
       }
-      return { text: 'Saving lists for offline… ' + (done + 1) + ' of ' + total, pct };
+      return {
+        text: (refreshOnly ? 'Updating saved lists… ' : 'Saving lists for offline… ')
+          + (done + 1) + ' of ' + total,
+        pct,
+      };
     }
 
     function renderSyncBar() {
@@ -2235,6 +2388,7 @@
       const before = painted ? JSON.stringify(current) : null;
       current = applyPendingOps(data);
       cacheList();
+      stampFetched(id, data); // `data`, not `current`: what the SERVER said
       if (painted && before === JSON.stringify(current)) return; // nothing changed
       renderScreen(() => renderList(current), painted ? 'none' : type);
       lastScreen = 'list';
@@ -2256,10 +2410,12 @@
       refreshInFlight = true;
       const id = current.list.id;
       try {
-        const data = applyPendingOps(await api('/api/lists/' + id, { timeoutMs: LOAD_TIMEOUT_MS }));
+        const fresh = await api('/api/lists/' + id, { timeoutMs: LOAD_TIMEOUT_MS });
+        const data = applyPendingOps(fresh);
         if (!current || current.list.id !== id) return; // navigated away mid-fetch
         current = data;
         cacheList();
+        stampFetched(id, fresh); // the raw response, for the same reason
         const ae = document.activeElement;
         let focus = null;
         if (ae && ae.tagName === 'INPUT') {
