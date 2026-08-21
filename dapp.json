@@ -159,6 +159,18 @@
       "path": "/?shot=nostore",
       "expectSelector": "#offline-chip:not(.hidden)",
       "expectText": "changes will be lost"
+    },
+    {
+      "name": "An offline boot with nothing saved keeps the app's chrome and explains itself",
+      "path": "/?shot=nocache",
+      "expectSelector": "body.is-offline #app header#home-bar ~ div button",
+      "expectText": "aren't saved on this device yet"
+    },
+    {
+      "name": "...and the strip admits there is no saved copy rather than promising one",
+      "path": "/?shot=nocache",
+      "expectSelector": "#offline-chip:not(.hidden)",
+      "expectText": "nothing saved on this device yet"
     }
   ],
   "visibility": {

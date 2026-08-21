@@ -139,6 +139,12 @@
     #offline-chip.hidden { display: none; }
     #offline-chip.tappable { pointer-events: auto; cursor: pointer; }
     #offline-chip.ok { background: var(--tint); color: #fff; }
+    /* The strip hangs under the fixed nav bar — but a screen can render
+       without one (an offline boot with nothing saved used to be exactly
+       that), and then a 3rem offset left it floating in open space with the
+       screen's own content behind it. Anchor it to the top instead whenever
+       there is no bar to sit under. */
+    body.no-navbar #offline-chip { top: env(safe-area-inset-top); }
     /* Make room so the strip never covers the first row of content. */
     body.has-strip #app { padding-top: 2.15rem; }
 
@@ -340,6 +346,10 @@
     // (?shot=diag) and the honest strip copy a device that refuses offline
     // storage gets (?shot=nostore). All three live behind a tap or a device
     // condition no navigation can reach. Display-only, in every environment.
+    // `?shot=nocache` is the offline boot this change is about: connected
+    // once never happened, so there is no saved copy to paint. Display-only,
+    // like every other shot link — it writes nothing and reads nothing.
+    const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
     const shotNostore = shot === 'nostore';
@@ -653,6 +663,11 @@
     // queued), so it is a note, not an error. 'blocked' = the server refused
     // our token, so the queue waits for a fresh one.
     let connState = navigator.onLine === false ? 'offline' : 'online';
+    // Whether what is ON SCREEN came out of the cache. The strip used to say
+    // "showing saved copy" from the fact that storage WORKS, which is a
+    // different question — so an offline boot with an empty cache promised a
+    // saved copy while the screen said "You're offline".
+    let showingSaved = false;
     const isOnline = () => connState !== 'offline';
     // Read by the Offline & storage read-out. Not persisted: "last sync" is a
     // fact about this session, and a stale one from three days ago would read
@@ -696,6 +711,7 @@
       if (shot === 'syncing') return { text: 'Syncing 2 changes…' };
       if (shot === 'slow') return { text: 'Slow connection — 2 changes will sync', tap: true };
       if (shot === 'nostore') return { text: 'Offline — changes will be lost if you close the app' };
+      if (shot === 'nocache') return { text: 'Offline — nothing saved on this device yet' };
       if (stripFlash) return { text: stripFlash, ok: true };
       const n = queueLength();
       if (connState === 'blocked') return { text: "Couldn't sync — tap to retry", tap: true };
@@ -703,7 +719,11 @@
         // Memory-only storage: never promise a saved copy we don't have, and
         // never claim a queued change "will sync" when closing the app drops it.
         if (!DURABLE) return { text: 'Offline — changes will be lost if you close the app' };
-        return { text: n ? 'Offline — ' + plural(n) + ' will sync' : 'Offline — showing saved copy' };
+        if (n) return { text: 'Offline — ' + plural(n) + ' will sync' };
+        // Same rule for the copy itself: only claim one when one is on screen.
+        return { text: showingSaved
+          ? 'Offline — showing saved copy'
+          : 'Offline — nothing saved on this device yet' };
       }
       if (connState === 'slow') {
         return n
@@ -734,7 +754,10 @@
       // Dimming of connection-only controls tracks the real state (or the
       // screenshot override, which is the whole point of the shot link).
       document.body.classList.toggle('is-offline',
-        connState === 'offline' || shot === 'offline' || shot === 'nostore');
+        connState === 'offline' || shot === 'offline' || shot === 'nostore'
+        || shot === 'nocache');
+      // Keep the strip's anchor in step with whether a nav bar is on screen.
+      document.body.classList.toggle('no-navbar', !document.querySelector('.un-navbar'));
       if (!chip) return;
       if (!st) {
         chip.classList.add('hidden');
@@ -1464,6 +1487,7 @@
       else if (shotEmpty) loadShotEmpty();
       else if (shotUndo) loadShotUndo();
       else if (shotDue || shotDueEditor) loadShotDue();
+      else if (shotNocache) loadShotNocache();
       else if (shotCollapsed) loadShotCollapsed();
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
@@ -1629,6 +1653,17 @@
       return items.length > 0 && items.every(i => i.checked);
     }
 
+    // Screenshot-state deep link — `/?shot=nocache` paints Home as a device
+    // that has never had the app open while connected meets it offline: the
+    // chrome, the plain explanation, and a strip that admits there is nothing
+    // saved. Reachable no other way — it needs an empty cache AND no network.
+    function loadShotNocache() {
+      connState = 'offline';
+      showingSaved = false;
+      renderHome([], { notice: offlineHomeNotice() });
+      lastScreen = 'home';
+    }
+
     // Screenshot-state deep link — `/?shot=collapsed` opens a list with its
     // first real category collapsed. Collapsing takes a tap, and the capture
     // harness can only navigate. Pure UI state: it flips the same local
@@ -1727,6 +1762,7 @@
       // reconciles in the background. The connection only ever affects how
       // fresh the screen is, never how long it takes to appear.
       const cached = cacheGet(HOME_KEY);
+      showingSaved = !!cached;
       if (cached) {
         renderScreen(() => renderHome(cached), type);
         lastScreen = 'home';
@@ -1738,12 +1774,17 @@
         ({ lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS }));
         lists = await maybeImportLandingList(lists);
         cacheSet(HOME_KEY, lists);
+        showingSaved = false;
       } catch (e) {
         if (seq !== loadSeq || current) return;
         // The saved copy is already on screen; the status strip explains why it
         // may be stale, so don't replace it with an error.
         if (cached) return;
-        app.innerHTML = '<p class="text-red-500 text-sm py-8 text-center">' + esc(e.message) + '</p>';
+        // Chrome either way — see renderHome's `notice`. Offline is not an
+        // error here, so it gets the plain explanation and a way to retry.
+        renderHome([], { notice: e.network
+          ? offlineHomeNotice()
+          : '<p class="text-red-500 text-sm py-8 text-center">' + esc(e.message) + '</p>' });
         lastScreen = 'home';
         return;
       }
@@ -1795,7 +1836,12 @@
       return `<div class="text-[13px] mt-0.5 truncate tinted">@${esc(a.actor)} ${a.verb === 'added' ? 'added' : 'checked'} “${esc(t)}”</div>`;
     }
 
-    function renderHome(lists) {
+    // `notice` replaces the list body while keeping the chrome. An offline
+    // boot with nothing saved used to replace the WHOLE screen with a red
+    // error line — no nav bar, no title, nothing to tap — which is the one
+    // moment the app most needs to look like an app rather than a failure.
+    function renderHome(lists, opts) {
+      const notice = opts && opts.notice;
       const app = document.getElementById('app');
       app.innerHTML = `
         <header id="home-bar" class="un-navbar un-safe-top">
@@ -1813,7 +1859,7 @@
         </header>
         <div style="height: calc(3rem + env(safe-area-inset-top))"></div>
         <h1 id="home-large-title" class="un-navbar-large pt-2 pb-4">My Lists</h1>
-        ${lists.length ? '<div class="un-group">' + lists.map(l => `
+        ${notice ? notice : lists.length ? '<div class="un-group">' + lists.map(l => `
           <a href="#/list/${l.id}" class="un-group-row un-pressable block px-4 py-3 hover:bg-[var(--fill)]">
             <div class="flex items-center gap-3">
               <div class="flex-1 min-w-0">
@@ -1836,6 +1882,21 @@
            </div>`}
       `;
       wireNative();
+      // The chrome just appeared (or didn't) — re-anchor the strip to match.
+      renderStrip();
+    }
+
+    // What Home says when this device has never held a copy of it. Deliberately
+    // not an error: nothing has gone wrong, the app simply has not been open
+    // while connected yet, and saying so is more use than the exception text.
+    function offlineHomeNotice() {
+      return `<div class="text-center py-16" style="color: var(--label2)">
+                <p class="text-[15px]">Your lists aren't saved on this device yet.</p>
+                <p class="text-[13px] mt-1" style="color: var(--label3)">
+                  Open Todo List once while connected and they'll be here next
+                  time, even with no signal.</p>
+                <button onclick="loadHome()" class="tinted text-[15px] font-medium mt-4">Try again</button>
+              </div>`;
     }
 
     // Silent refetch for pull-to-refresh — no "Loading…" wipe.
@@ -1883,6 +1944,7 @@
       // changes start arriving while the refetch is still in the air.
       const cached = cacheGet(listKey(id));
       let painted = false;
+      showingSaved = !!cached;
       if (cached) {
         current = applyPendingOps(cached);
         touchList(id);
@@ -1900,6 +1962,7 @@
         if (seq !== loadSeq) return;
         if (painted) return; // saved copy stands; the strip explains the rest
         disconnectEvents();
+        showingSaved = false; // nothing of this list is on screen
         // A list never opened while connected has nothing to show — say that
         // plainly instead of showing a red error.
         app.innerHTML = e.network
@@ -1910,10 +1973,12 @@
              </div>`
           : `<p class="text-red-500 text-sm py-8 text-center">${esc(e.message)}</p>
              <p class="text-center"><a href="#/" class="tinted text-sm">‹ Back to My Lists</a></p>`;
+        renderStrip(); // this screen has no nav bar for the strip to hang under
         lastScreen = 'list';
         return;
       }
       if (seq !== loadSeq) return; // navigated away mid-fetch
+      showingSaved = false; // this is live data now, not the saved copy
       const before = painted ? JSON.stringify(current) : null;
       current = applyPendingOps(data);
       cacheList();
@@ -2290,6 +2355,9 @@
         </form>
       `;
       wireNative();
+      // The chrome just changed — keep the strip's anchor in step (renderHome
+      // does the same). Cheap: a class toggle and a text write.
+      renderStrip();
       syncUndoChrome();
     }
 
