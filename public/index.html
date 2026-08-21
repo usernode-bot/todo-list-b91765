@@ -97,6 +97,18 @@
   <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
   <link rel="stylesheet" href="/theme.css">
   <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
+  <!-- usernode-bridge — centrally hosted, never vendored. This app used no
+       bridge API, so it shipped without the tag; it needs it now for one
+       thing it cannot do for itself. The shell cannot see into this origin,
+       so offline it used to refuse to mount ANY app frame and showed "This
+       app needs a connection — reconnect to open it." — this app's whole
+       offline layer below (precached shell, saved copy, queued changes)
+       included, because the document that would have used it was never
+       requested. The bridge tells the shell the one fact that changes that:
+       a service worker is controlling this document, so a reload with no
+       network is served from /sw.js's cache. Loading it also gives the app
+       the rest of the platform API for free. -->
+  <script src="https://social-vibecoding.usernodelabs.org/usernode-bridge/v1/bridge.js"></script>
   <style>
     /* The brand palette, --un-* kit overrides, Fraunces title rule, .tinted
        and the .todo-check checkbox live in /theme.css — shared with the

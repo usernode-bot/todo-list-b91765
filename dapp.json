@@ -15,6 +15,11 @@
       "expectSelector": "html.un-ios, html.un-android, html.un-desktop"
     },
     {
+      "name": "The app loads the platform bridge, which is what tells the shell it can open offline",
+      "path": "/",
+      "expectSelector": "script[src$=\"/usernode-bridge/v1/bridge.js\"]"
+    },
+    {
       "name": "Shared list counts the owner in its member count",
       "path": "/",
       "expectText": "2 members"
