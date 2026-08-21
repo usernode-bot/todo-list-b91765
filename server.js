@@ -247,7 +247,7 @@ app.get('/api/lists', async (req, res) => {
         WHERE l.owner_id = $1
            OR EXISTS (SELECT 1 FROM list_members m WHERE m.list_id = l.id
                         AND (m.user_id = $1 OR LOWER(m.username) = LOWER($2)))
-        ORDER BY l.created_at DESC`,
+        ORDER BY l.created_at DESC, l.id DESC`,
       [req.user.id, req.user.username]
     );
     res.json({ lists: rows });

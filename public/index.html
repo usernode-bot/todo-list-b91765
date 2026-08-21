@@ -1605,6 +1605,30 @@
       return loadList(lists[0].id);
     }
 
+    // Which list a shot opens must be chosen by SHAPE, never by position.
+    // seedDemoListFor writes every demo list inside one transaction, and
+    // Postgres NOW() is the transaction timestamp, so they all share a
+    // created_at — whichever sorts first is an accident of the tiebreaker.
+    // Today that is "Demo: Due Dates", whose only category is the default
+    // bucket, so a shot that needs a real category found none and rendered
+    // nothing. loadShotEmpty above already picks this way; this is the same
+    // scan, factored out for the two loaders that needed it.
+    async function firstListWhere(lists, wanted) {
+      for (const l of lists) {
+        let d = null;
+        try { d = await api('/api/lists/' + l.id); } catch (_) {}
+        if (d && wanted(d)) return l.id;
+      }
+      return lists[0].id;
+    }
+
+    // True when `cat` in payload `d` has items and every one of them is ticked
+    // — isCatFullyDone's question, asked of a list we haven't opened yet.
+    function catDoneIn(d, cat) {
+      const items = d.items.filter(i => i.category_id === cat.id);
+      return items.length > 0 && items.every(i => i.checked);
+    }
+
     // Screenshot-state deep link — `/?shot=collapsed` opens a list with its
     // first real category collapsed. Collapsing takes a tap, and the capture
     // harness can only navigate. Pure UI state: it flips the same local
@@ -1613,7 +1637,8 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && d.items.some(i => i.category_id === c.id))));
       if (!current) return;
       // Prefer a category with items and none of them ticked — the case the
       // old chevron couldn't do anything with, and the point of the change.
@@ -1634,7 +1659,8 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && catDoneIn(d, c))));
       if (!current) return;
       const target = current.categories.find(c => !c.is_default && isCatFullyDone(c.id));
       if (!target) return;
