@@ -387,9 +387,12 @@
     // once never happened, so there is no saved copy to paint. Display-only,
     // like every other shot link — it writes nothing and reads nothing.
     // `?shot=syncbar` / `?shot=syncdone` — the offline-sync bar mid-pass and
-    // finished. Both are display-only: they never fetch, never write, and the
-    // real pass stands down while they are on (see prefetchLists).
-    const shotSync = shot === 'syncbar' || shot === 'syncdone';
+    // finished. `?shot=synccap` is the third thing it can say: the cap is
+    // full, so the newest lists don't fit. That one needs MAX_CACHED_LISTS
+    // lists already saved on the device before it can appear at all, which no
+    // navigation can arrange. All display-only: they never fetch, never write,
+    // and the real pass stands down while they are on (see prefetchLists).
+    const shotSync = shot === 'syncbar' || shot === 'syncdone' || shot === 'synccap';
     const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
@@ -627,6 +630,29 @@
       return out;
     })();
 
+    // Reclaim list payloads that nothing points at. The background pass used
+    // to write the payload before asking the LRU for room, so a device that
+    // ran that version is carrying saved lists no eviction path can reach —
+    // they outlive the cap and they outlive the list being deleted. A payload
+    // is only ever written alongside its LRU entry, so "not in the LRU" is
+    // exactly the set that leaked. Costs one pass at boot, and on a device
+    // that never leaked it removes nothing.
+    //
+    // Deliberately AFTER the census above, which promises a count taken before
+    // this load writes anything — reclaiming is a write, and the read-out
+    // would otherwise report a number no later look could reproduce.
+    (function sweepOrphanedLists() {
+      if (!DURABLE) return;
+      try {
+        const known = new Set((cacheGet(LRU_KEY) || []).map(String));
+        const prefix = NS + 'cache:list:';
+        for (const k of Object.keys(localStorage)) {
+          if (k.indexOf(prefix) !== 0) continue;
+          if (!known.has(k.slice(prefix.length))) rawRemove(k);
+        }
+      } catch (_) { /* enumeration denied — nothing to reclaim */ }
+    })();
+
     // Set when a save of the Home copy was ATTEMPTED and refused (quota, or a
     // storage that accepts the probe and rejects real writes). Without this a
     // failed save is indistinguishable from one that never happened.
@@ -678,6 +704,14 @@
       if (lru.length >= MAX_CACHED_LISTS) return false;
       lru.push(key);
       return cacheSet(LRU_KEY, lru);
+    }
+
+    // Give the slot back. Used when the payload write fails after the slot was
+    // reserved — without it the cap would be spent on a list that isn't
+    // actually saved, and the next pass would see a full LRU and stop.
+    function forgetSaved(id) {
+      const key = String(id);
+      cacheSet(LRU_KEY, (cacheGet(LRU_KEY) || []).filter(x => String(x) !== key));
     }
 
     function cacheList() {
@@ -2029,7 +2063,7 @@
 
       syncState = { done: 0, total: missing.length, skipped, failed: false };
       renderSyncBar();
-      let stoppedEarly = false;
+      let stoppedEarly = false, capped = false;
       for (const l of missing) {
         if (mySeq !== syncSeq) return;            // a newer Home load owns this now
         if (!isOnline()) { stoppedEarly = true; break; }
@@ -2043,7 +2077,15 @@
           break;
         }
         if (mySeq !== syncSeq) return;
-        if (!cacheSet(listKey(l.id), d) || !rememberSaved(l.id)) {
+        // Reserve the slot BEFORE writing the payload. The other order wrote
+        // the list and THEN asked for room, so a full LRU left the payload in
+        // storage with nothing pointing at it — and every eviction path we
+        // have (touchList, cacheSetOrEvict) walks the LRU, so it could never
+        // be reclaimed. One new list past the cap leaked one payload, on every
+        // Home load, with no ceiling.
+        if (!rememberSaved(l.id)) { capped = true; break; }
+        if (!cacheSet(listKey(l.id), d)) {
+          forgetSaved(l.id);
           syncState.failed = true;
           break;
         }
@@ -2051,6 +2093,13 @@
         renderSyncBar();
       }
       if (mySeq !== syncSeq) return;
+      if (capped) {
+        // Not a failure and not a storage problem: MAX_CACHED_LISTS lists are
+        // already saved, and these are the ones that don't fit beside them.
+        // Reported the same way as lists past the cap always were.
+        syncState.skipped += syncState.total - syncState.done;
+        syncState.total = syncState.done;
+      }
       if (stoppedEarly && !syncState.failed) { syncState = null; renderSyncBar(); return; }
       renderSyncBar();
       // Let the finished state be readable, then take the bar away.
@@ -2067,6 +2116,9 @@
       // Display-only deep links, so the bar is capturable: neither writes.
       if (shot === 'syncbar') return { text: 'Saving lists for offline… 2 of 5', pct: 20 };
       if (shot === 'syncdone') return { text: 'All lists saved for offline', ok: true, pct: 100 };
+      if (shot === 'synccap') {
+        return { text: plurLists(3) + " won't fit — " + MAX_CACHED_LISTS + ' are already saved', ok: true, pct: 100 };
+      }
       if (current) return null;   // list view; the top strip speaks there
       if (!syncState) return null;
       const { done, total, skipped, failed } = syncState;
@@ -2075,9 +2127,13 @@
         return { text: 'Saved ' + plurLists(done) + ' — not enough storage for the rest', pct };
       }
       if (done >= total) {
-        return skipped
-          ? { text: 'Saved ' + plurLists(total) + ' for offline · ' + skipped + ' more won\'t fit', ok: true, pct: 100 }
-          : { text: 'All lists saved for offline', ok: true, pct: 100 };
+        if (!skipped) return { text: 'All lists saved for offline', ok: true, pct: 100 };
+        // "Saved 0 lists for offline" reads as a failure when nothing was left
+        // to do: say what is actually true, which is that the cap is full.
+        return { text: done
+            ? 'Saved ' + plurLists(total) + ' for offline · ' + skipped + ' more won\'t fit'
+            : plurLists(skipped) + " won't fit — " + MAX_CACHED_LISTS + ' are already saved',
+          ok: true, pct: 100 };
       }
       return { text: 'Saving lists for offline… ' + (done + 1) + ' of ' + total, pct };
     }

@@ -173,6 +173,12 @@
       "expectText": "All lists saved for offline"
     },
     {
+      "name": "...and says when the cap, not storage, is what stopped it",
+      "path": "/?shot=synccap",
+      "expectSelector": "#sync-bar:not(.hidden) .sync-fill",
+      "expectText": "10 are already saved"
+    },
+    {
       "name": "An offline boot with nothing saved keeps the app's chrome and explains itself",
       "path": "/?shot=nocache",
       "expectSelector": "body.is-offline #app header#home-bar ~ div button",
