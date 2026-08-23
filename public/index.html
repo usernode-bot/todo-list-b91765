@@ -359,10 +359,12 @@
     // live behind a tap, and screenshots/tests can only navigate — so without
     // these the mobile layout of either modal is uncapturable. Pure UI state:
     // they open a modal on an existing list and write nothing.
-    // `?shot=invite` is `?shot=members` with the typeahead already open: the
-    // suggestion list is the whole point of issue #50, and a shot of the
-    // closed field shows none of it.
-    const shotModal = (shot === 'import' || shot === 'members' || shot === 'invite') ? shot : '';
+    // `?shot=invite` is `?shot=members` with the typeahead already open, and
+    // `?shot=invitenone` is the same box refusing a handle nobody owns: the
+    // suggestion list and the refusal are the whole point of issue #50, and a
+    // shot of the closed field shows neither.
+    const shotModal = (shot === 'import' || shot === 'members'
+                       || shot === 'invite' || shot === 'invitenone') ? shot : '';
     // Screenshot/test deep links for the two states this change introduces:
     // the first-load skeleton (?shot=loading) and a row waiting to sync
     // (?shot=pending). Both only exist for a moment on a slow connection, so
@@ -1759,14 +1761,32 @@
       );
       renderList(current); // keep the header's 👥 count in step with the modal
       openMembers();
+      // The two invite shots are DISPLAY-ONLY fixtures: they paint a result
+      // the directory would have returned instead of calling it. They have to
+      // be, because the real directory has no `staging-demo-*` accounts to
+      // find — so a shot that queried it would photograph an empty box. The
+      // plain (non-shot) path always calls the real directory, and these work
+      // in every environment. Nothing is invited and nothing is written.
       if (shotModal === 'invite') {
-        // Type the prefix the staging seed answers to and open the list, the
-        // same path a keystroke takes. Display-only: nothing is invited.
         const { input } = inviteEls();
         if (input) {
           input.value = SHOT_INVITE_PREFIX;
           input.focus();
-          await fetchInviteSuggestions(SHOT_INVITE_PREFIX);
+          applyInviteResult(SHOT_INVITE_PREFIX, {
+            usernames: SHOT_INVITE_HITS, exists: false, filtered: false,
+            hasMore: true, unavailable: false,
+          });
+        }
+      }
+      if (shotModal === 'invitenone') {
+        const { input } = inviteEls();
+        if (input) {
+          input.value = SHOT_INVITE_MISS;
+          input.focus();
+          applyInviteResult(SHOT_INVITE_MISS, {
+            usernames: [], exists: false, filtered: false,
+            hasMore: false, unavailable: false,
+          });
         }
       }
     }
@@ -4084,8 +4104,9 @@
       const body = document.getElementById('members-body');
       if (!body) return;
       // The invite box is rebuilt below, so drop any suggestions belonging to
-      // the old one (and void an in-flight lookup that would repopulate them).
-      inviteHits = []; inviteAt = -1; inviteSeq++;
+      // the old one (and void an in-flight lookup that would repopulate them),
+      // along with the note and the disabled verdict attached to the old input.
+      inviteHits = []; inviteAt = -1; inviteSeq++; inviteBlocked = false;
       body.innerHTML = `
         <div class="space-y-1.5 mb-4">
           <div class="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg" style="background: var(--fill)">
@@ -4104,7 +4125,7 @@
             <div class="relative flex-1 min-w-0">
               <input id="invite-input" name="username" placeholder="Invite by username…" autocomplete="off" size="1"
                      role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="invite-suggest"
-                     oninput="onInviteInput()" onkeydown="onInviteKey(event)" onfocus="onInviteInput()"
+                     oninput="onInviteInput()" onkeydown="onInviteKey(event)"
                      class="w-full min-w-0 rounded-lg px-3 py-2 text-sm focus:outline-none"
                      style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
               <!-- Opens upward: the invite row is the last thing in the card, so a
@@ -4113,52 +4134,201 @@
                   class="hidden absolute left-0 right-0 bottom-full z-20 mb-1 py-1 rounded-lg shadow-lg"
                   style="background: var(--card); border: 1px solid var(--separator); max-height: 11rem; overflow-y: auto"></ul>
             </div>
-            <button class="text-sm px-3 py-2 rounded-lg btn-primary shrink-0">Invite</button>
+            <button id="invite-submit" class="text-sm px-3 py-2 rounded-lg btn-primary shrink-0">Invite</button>
           </form>
-          <p class="text-[11px] mt-2" style="color: var(--label3)">You can only invite people who’ve used Todo List — start typing to find them. Invites take effect immediately.</p>`
+          <!-- The no-match / already-a-member / can't-check line. Deliberately
+               OUTSIDE the listbox: a "no results" option would be arrow-selectable
+               and announced as a real choice. -->
+          <p id="invite-note" role="status" aria-live="polite" class="hidden text-[11px] mt-2" style="color: var(--label3)"></p>
+          <p class="text-[11px] mt-2" style="color: var(--label3)">Invite anyone on Usernode by their username. Invites take effect immediately.</p>`
         : '<p class="text-xs" style="color: var(--label3)">Only the owner can manage members.</p>'}
       `;
     }
 
     // --- invite autocomplete ----------------------------------------------------
-    // The invite box only accepts handles the server knows (see
-    // /api/lists/:id/member-suggestions). Suggestions are fetched per keystroke,
-    // debounced, and stale responses are dropped by sequence number so a slow
-    // reply can't overwrite a newer one. Purely additive: typing a full handle
-    // and pressing Enter still works without ever opening the list.
-    const INVITE_DEBOUNCE_MS = 180;
-    // Matches the handles seedDemoListFor puts in known_users — see ?shot=invite.
+    // Suggestions and validation both come from the PLATFORM user directory,
+    // so anyone with a Usernode account can be invited whether or not they
+    // have ever opened Todo List (issue #50).
+    //
+    // Two tiers: the bridge (usernode.searchUsers) when the app is running
+    // inside the platform shell, and this app's own server route as a fallback
+    // when it isn't. Both can fail — outside the shell the bridge rejects by
+    // design — and a failure NEVER blocks an invite: the box says it couldn't
+    // check, the Invite button stays live, and the server has the final word.
+    const INVITE_DEBOUNCE_MS = 200;
+    // Below this, a prefix would be a request to enumerate the whole platform.
+    const INVITE_MIN_CHARS = 2;
+    // After a failed/rate-limited lookup, stop asking for a moment.
+    const INVITE_BACKOFF_MS = 5000;
+    const INVITE_CACHE_MAX = 50;
+    // Matches the display-only fixture behind ?shot=invite — see loadShotModal.
     const SHOT_INVITE_PREFIX = 'staging-demo';
+    const SHOT_INVITE_HITS = ['staging-demo-alex', 'staging-demo-sam', 'staging-demo-priya'];
+    // A handle nobody owns — the refusal state behind ?shot=invitenone.
+    const SHOT_INVITE_MISS = 'staging-demo-nobody';
     let inviteTimer = null, inviteSeq = 0, inviteHits = [], inviteAt = -1;
+    // True only when a lookup actually answered and said this exact handle is
+    // nobody. Never set from a lookup that failed to run.
+    let inviteBlocked = false;
+    let inviteBackoffUntil = 0;
+    // q(lower) -> resolved result, for this page session only.
+    const inviteCache = new Map();
 
     function inviteEls() {
-      return { input: document.getElementById('invite-input'), box: document.getElementById('invite-suggest') };
+      return {
+        input: document.getElementById('invite-input'),
+        box: document.getElementById('invite-suggest'),
+        note: document.getElementById('invite-note'),
+        submit: document.getElementById('invite-submit'),
+      };
     }
 
     function onInviteInput() {
       const { input } = inviteEls();
       if (!input) return;
       const q = input.value.trim().replace(/^@/, '');
+      // Any keystroke clears a stale verdict — the handle just changed.
+      setInviteBlocked(false);
       if (inviteTimer) clearTimeout(inviteTimer);
+      if (q.length < INVITE_MIN_CHARS) {
+        inviteSeq++; // void anything in flight
+        inviteHits = []; inviteAt = -1;
+        renderInviteSuggestions();
+        setInviteNote('');
+        return;
+      }
       inviteTimer = setTimeout(() => fetchInviteSuggestions(q), INVITE_DEBOUNCE_MS);
     }
+
+    // Who is already spoken for on this list. Filtered client-side on the
+    // bridge path, because the bridge knows nothing about this list.
+    function inviteTakenHandles() {
+      const taken = new Set();
+      if (!current) return taken;
+      if (current.list && current.list.owner_username) taken.add(current.list.owner_username.toLowerCase());
+      (current.members || []).forEach(m => m && m.username && taken.add(m.username.toLowerCase()));
+      return taken;
+    }
+
+    function inviteCachePut(key, value) {
+      if (inviteCache.size >= INVITE_CACHE_MAX) {
+        const oldest = inviteCache.keys().next().value;
+        if (oldest !== undefined) inviteCache.delete(oldest);
+      }
+      inviteCache.set(key, value);
+    }
+
+    // Tier 1: the bridge. Rejects outside the platform shell — that's a
+    // "couldn't ask", not an answer.
+    async function inviteSearchViaBridge(q) {
+      if (!window.usernode || typeof usernode.searchUsers !== 'function') return null;
+      let out;
+      try {
+        out = await usernode.searchUsers(q, { limit: 10 });
+      } catch (_) {
+        return null;
+      }
+      const names = ((out && out.users) || []).map(u => u && u.username).filter(Boolean);
+      const exists = names.some(n => n.toLowerCase() === q.toLowerCase());
+      const taken = inviteTakenHandles();
+      return {
+        usernames: names.filter(n => !taken.has(n.toLowerCase())).slice(0, 8),
+        exists,
+        filtered: exists && taken.has(q.toLowerCase()),
+        hasMore: !!(out && out.has_more),
+        unavailable: false,
+      };
+    }
+
+    // Tier 2: this app's server, which asks the same directory with the
+    // forwarded token (and does its own owner/member filtering).
+    async function inviteSearchViaServer(q) {
+      if (!current || !current.list) return null;
+      try {
+        const r = await api('/api/lists/' + current.list.id + '/member-suggestions?q=' + encodeURIComponent(q));
+        return {
+          usernames: r.usernames || [],
+          exists: !!r.exists,
+          filtered: !!r.filtered,
+          hasMore: !!r.hasMore,
+          unavailable: !!r.unavailable,
+        };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    const INVITE_UNAVAILABLE = { usernames: [], exists: false, filtered: false, hasMore: false, unavailable: true };
 
     async function fetchInviteSuggestions(q) {
       if (!current || !isOnline()) return;
       const seq = ++inviteSeq;
-      let hits = [];
-      try {
-        ({ usernames: hits } = await api(
-          '/api/lists/' + current.list.id + '/member-suggestions?q=' + encodeURIComponent(q)));
-      } catch (_) {
-        // Suggestions are a convenience — a failed lookup just shows nothing.
-        // The invite itself is still validated server-side.
-        hits = [];
+      const key = q.toLowerCase();
+      let result = inviteCache.get(key);
+      if (!result) {
+        if (Date.now() < inviteBackoffUntil) return; // still backing off; keep what's on screen
+        result = await inviteSearchViaBridge(q);
+        if (!result) result = await inviteSearchViaServer(q);
+        if (!result) result = INVITE_UNAVAILABLE;
+        if (result.unavailable) inviteBackoffUntil = Date.now() + INVITE_BACKOFF_MS;
+        else inviteCachePut(key, result);
       }
       if (seq !== inviteSeq) return; // a newer keystroke already won
-      inviteHits = hits || [];
+      applyInviteResult(q, result);
+    }
+
+    function applyInviteResult(q, result) {
+      inviteHits = result.usernames || [];
       inviteAt = -1;
       renderInviteSuggestions();
+      if (result.unavailable) {
+        setInviteNote("Can’t check usernames right now.");
+        setInviteBlocked(false);
+        return;
+      }
+      if (result.filtered) {
+        setInviteNote('@' + q + ' is already on this list.');
+        setInviteBlocked(false);
+        return;
+      }
+      if (result.exists || result.hasMore) {
+        // Either the typed name is on the directory, or the prefix window was
+        // truncated and the exact match may simply be off the end of it —
+        // ordering isn't part of the search contract, so a full page of
+        // results is never proof of absence.
+        setInviteNote('');
+        setInviteBlocked(false);
+        return;
+      }
+      // The directory answered and nobody by that exact name is on it. Only
+      // these two paths may disable the button. Which note depends on whether
+      // there is anything to pick: saying "no one matches" over a list of
+      // matches reads as a dead end at the exact moment the box is being
+      // helpful.
+      setInviteNote(inviteHits.length
+        ? 'Pick a username from the list.'
+        : 'No one on Usernode matches @' + q + '.');
+      setInviteBlocked(true);
+    }
+
+    function setInviteNote(msg) {
+      const { note } = inviteEls();
+      if (!note) return;
+      note.textContent = msg || '';
+      note.classList.toggle('hidden', !msg);
+    }
+
+    function setInviteBlocked(on) {
+      inviteBlocked = !!on;
+      const { input, submit } = inviteEls();
+      if (input) {
+        if (on) input.setAttribute('aria-invalid', 'true');
+        else input.removeAttribute('aria-invalid');
+      }
+      if (submit) {
+        submit.disabled = !!on;
+        submit.classList.toggle('opacity-50', !!on);
+      }
     }
 
     function renderInviteSuggestions() {
@@ -4204,8 +4374,11 @@
       const { input } = inviteEls();
       const pick = inviteHits[i];
       if (!input || !pick) return;
+      // Takes the directory's spelling, not the inviter's.
       input.value = pick;
       closeInviteSuggestions();
+      setInviteNote('');
+      setInviteBlocked(false);
       input.focus();
     }
 
@@ -4234,6 +4407,7 @@
     function inviteMember(ev) {
       ev.preventDefault();
       if (!isOnline()) { requireOnline(); return false; }
+      if (inviteBlocked) return false;
       const form = ev.target;
       const input = form.elements.username;
       const username = input.value.trim();
@@ -4241,13 +4415,19 @@
       closeInviteSuggestions();
       withBusy(form, async () => {
         try {
-          await api('/api/lists/' + current.list.id + '/members', {
+          const reply = await api('/api/lists/' + current.list.id + '/members', {
             method: 'POST', body: JSON.stringify({ username }), timeoutMs: MUTATION_TIMEOUT_MS,
           });
+          // This handle's cached search result is now stale — they are a member.
+          inviteCache.delete(username.replace(/^@/, '').toLowerCase());
           current = await api('/api/lists/' + current.list.id, { timeoutMs: LOAD_TIMEOUT_MS });
           renderList(current);
           renderMembers(); // modal stays open; refresh its body
-          toast('@' + username.replace(/^@/, '') + ' added');
+          const handle = '@' + username.replace(/^@/, '');
+          // Say so when the name could not be checked, rather than implying it was.
+          toast(reply && reply.unverified
+            ? handle + ' added — we couldn’t check that name right now.'
+            : handle + ' added');
         } catch (e) { reportWriteError(e); }
       });
       return false;

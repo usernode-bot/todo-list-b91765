@@ -37,9 +37,6 @@ app.use((req, res, next) => {
       if (payload.pur === 'iframe') req.user = payload;
     } catch {}
   }
-  // Record the caller in the invite directory (see rememberUser below).
-  if (req.user) rememberUser(req.user);
-
   // Static assets (CSS/JS/images) are always served; the API and the HTML
   // shell are gated so direct hits to the staging/prod subdomain don't
   // leak app data to the public internet.
@@ -49,33 +46,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-
-// The invite directory: every user the app has authenticated. Invites are
-// validated against it (see the members routes), so what it records has to be
-// exactly what the rejection message claims — "has opened the app once".
-// Inferring that from leftover data instead (lists owned, items touched) locks
-// out every user who has opened the app and not yet made anything, which is
-// most of the people worth inviting.
-//
-// Deliberately a write on the auth path. The in-process cache keeps it to one
-// INSERT per user per container, and it is fire-and-forget so no request waits
-// on it. A failure drops the user from the cache so the next request retries,
-// rather than leaving a hole in the directory until the container restarts.
-const rememberedUsers = new Set();
-function rememberUser(user) {
-  if (!user || !user.username) return;
-  const key = user.username.toLowerCase();
-  if (rememberedUsers.has(key)) return;
-  rememberedUsers.add(key);
-  pool.query(
-    `INSERT INTO known_users (username) VALUES ($1)
-     ON CONFLICT (lower(username)) DO NOTHING`,
-    [user.username]
-  ).catch(err => {
-    rememberedUsers.delete(key);
-    console.error('known_users insert failed:', err.message);
-  });
-}
 
 app.get('/health', (_req, res) => {
   if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
@@ -494,49 +464,124 @@ app.post('/api/lists/:id/import', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// The platform user directory
+//
+// Invite autocomplete and invite validation both read the PLATFORM's user
+// directory, not a roster of people this app happens to have met. The app used
+// to keep its own `known_users` table for this, which rejected every real
+// Usernode account that had not yet opened Todo List — issue #50.
+//
+// Two endpoints, both read-only, both returning only `{ id, username }`:
+//   GET /users/search?q=<prefix>&limit=<n>   prefix typeahead
+//   GET /users/lookup?username=<handle>      exact existence check
+//
+// USERNODE_PLATFORM_API_URL is injected into BOTH production and staging
+// (unlike every other platform credential pair), so one code path covers both.
+// The app token only exists in production; the /users/* routes are the one
+// place the platform authenticates from the user token alone, which is what
+// makes these work in a staging preview. So the app-token header is
+// conditional on the value being present — never on USERNODE_ENV.
+// ---------------------------------------------------------------------------
+
+const PLATFORM_API_URL = process.env.USERNODE_PLATFORM_API_URL;
+const PLATFORM_APP_TOKEN = process.env.USERNODE_LLM_PROXY_TOKEN;
+
+// The auth middleware keeps only the decoded payload on req.user, so the raw
+// bearer string has to be read again to forward it.
+function rawUserToken(req) {
+  return req.query.token || req.headers['x-usernode-token'] || '';
+}
+
+function directoryHeaders(req) {
+  const headers = { 'x-usernode-user-token': rawUserToken(req) };
+  if (PLATFORM_APP_TOKEN) headers['x-usernode-app-token'] = PLATFORM_APP_TOKEN;
+  return headers;
+}
+
+// Ask the directory a question. Returns { ok: true, data } ONLY for a 2xx JSON
+// body; every other outcome — no platform URL, no user token, a non-2xx
+// (including 429 rate_limited), a timeout, a parse failure — is { ok: false },
+// meaning "the question was not answered".
+//
+// That distinction is the load-bearing rule of this whole feature: an
+// unanswered question must never be read as "this user does not exist". This
+// never throws to its caller.
+async function directoryGet(req, pathAndQuery, timeoutMs) {
+  if (!PLATFORM_API_URL) return { ok: false };
+  const userToken = rawUserToken(req);
+  if (!userToken) return { ok: false };
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(PLATFORM_API_URL + pathAndQuery, {
+      headers: directoryHeaders(req),
+      signal: ctl.signal,
+    });
+    if (!resp.ok) return { ok: false };
+    return { ok: true, data: await resp.json() };
+  } catch (err) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const DIRECTORY_SEARCH_TIMEOUT_MS = 2500;
+const DIRECTORY_LOOKUP_TIMEOUT_MS = 4000;
+
+// Handles already spoken for on this list: the owner plus every member.
+async function listHandles(list) {
+  const { rows } = await pool.query(
+    `SELECT username FROM list_members WHERE list_id = $1`, [list.id]
+  );
+  const taken = new Set(rows.map(r => (r.username || '').toLowerCase()));
+  if (list.owner_username) taken.add(list.owner_username.toLowerCase());
+  return taken;
+}
+
+// ---------------------------------------------------------------------------
 // Members (owner only; invites take effect immediately)
 // ---------------------------------------------------------------------------
 
-// Invite autocomplete + validation both read the `known_users` directory —
-// every user the app has authenticated (see rememberUser), plus everyone
-// backfilled on boot from data that predates the table. The platform exposes
-// no directory API an app can ask whether a handle exists, so the app can only
-// vouch for users it has met itself.
-//
-// Returns the STORED spelling of `username`, or null if the app has never seen
-// it. Case-insensitive, and canonical on purpose: a member row should record a
-// handle as its owner writes it, not as the inviter happened to type it.
-async function canonicalUsername(username) {
-  const { rows } = await pool.query(
-    `SELECT username FROM known_users WHERE lower(username) = lower($1) LIMIT 1`,
-    [username]
-  );
-  return rows.length ? rows[0].username : null;
-}
-
-// Typeahead for the invite box: known usernames matching a prefix, minus the
+// Typeahead for the invite box: platform handles matching a prefix, minus the
 // list owner and anyone already on the list. Owner-only, mirroring who may
-// invite. An empty query returns the directory (owner/members excluded) so the
-// box can suggest people the moment it's focused.
+// invite.
+//
+// `exists` is computed BEFORE the owner/member filter, so the box can say
+// "already on this list" instead of wrongly claiming nobody by that name
+// exists. `unavailable: true` means the lookup could not run — the client
+// degrades open on it and never blocks an invite.
 app.get('/api/lists/:id/member-suggestions', async (req, res) => {
   try {
     const { list, role } = await getListRole(req.params.id, req.user);
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
     if (role !== 'owner') return res.status(403).json({ error: 'Only the owner can invite members' });
     const q = (req.query.q || '').trim().replace(/^@/, '');
-    // Escape LIKE wildcards so a stray % or _ is matched as a literal character.
-    const prefix = q.replace(/[\\%_]/g, '\\$&');
-    const { rows } = await pool.query(
-      `SELECT u.username FROM known_users u
-        WHERE ($2::text = '' OR lower(u.username) LIKE lower($2::text) || '%' ESCAPE '\\')
-          AND lower(u.username) <> lower($3::text)
-          AND lower(u.username) NOT IN (
-                SELECT lower(username) FROM list_members WHERE list_id = $1)
-        ORDER BY u.username
-        LIMIT 8`,
-      [list.id, prefix, list.owner_username]
+    // An empty/1-char prefix would be a request to enumerate the platform, and
+    // the directory rate limit (120/min per app+user, shared across both
+    // endpoints) is worth spending on real queries.
+    if (q.length < 2) {
+      return res.json({ usernames: [], exists: false, filtered: false, hasMore: false, unavailable: false });
+    }
+    const hit = await directoryGet(
+      req, '/users/search?q=' + encodeURIComponent(q) + '&limit=10',
+      DIRECTORY_SEARCH_TIMEOUT_MS
     );
-    res.json({ usernames: rows.map(r => r.username) });
+    if (!hit.ok) {
+      return res.json({ usernames: [], exists: false, filtered: false, hasMore: false, unavailable: true });
+    }
+    const users = Array.isArray(hit.data && hit.data.users) ? hit.data.users : [];
+    const names = users.map(u => u && u.username).filter(Boolean);
+    const exists = names.some(n => n.toLowerCase() === q.toLowerCase());
+    const taken = await listHandles(list);
+    const usernames = names.filter(n => !taken.has(n.toLowerCase())).slice(0, 8);
+    res.json({
+      usernames,
+      exists,
+      filtered: exists && taken.has(q.toLowerCase()),
+      hasMore: !!(hit.data && hit.data.has_more),
+      unavailable: false,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -552,15 +597,25 @@ app.post('/api/lists/:id/members', async (req, res) => {
     if (username.toLowerCase() === (list.owner_username || '').toLowerCase()) {
       return res.status(400).json({ error: 'You already own this list' });
     }
-    // Only invite handles the app has actually seen — see canonicalUsername.
-    const canonical = await canonicalUsername(username);
-    if (!canonical) {
-      return res.status(422).json({
-        error: `@${username} hasn’t used Todo List yet — they need to open the app once before you can invite them.`,
-      });
+    // The authoritative existence check. An explicit `found === false` is the
+    // ONLY thing that may reject an invite — a lookup that could not run
+    // degrades open and accepts the handle as typed, because "we couldn't ask"
+    // is not "that person doesn't exist".
+    const hit = await directoryGet(
+      req, '/users/lookup?username=' + encodeURIComponent(username),
+      DIRECTORY_LOOKUP_TIMEOUT_MS
+    );
+    const answered = hit.ok && typeof hit.data.found === 'boolean';
+    if (answered && hit.data.found === false) {
+      return res.status(422).json({ error: `There’s no @${username} on Usernode.` });
     }
-    // Stored under the canonical spelling, so inviting "BOB" doesn't leave
-    // "BOB" in the members list of someone whose handle is "bob".
+    // Stored under the directory's canonical spelling, so inviting "BOB"
+    // doesn't leave "BOB" in the members list of someone whose handle is
+    // "bob". `user_id` is deliberately NOT written from the directory: access
+    // is granted on it (see getListRole), and the username match already
+    // backfills it correctly the first time the invitee shows up.
+    const canonical = (answered && hit.data.found && hit.data.user && hit.data.user.username)
+      || username;
     const { rows } = await pool.query(
       `INSERT INTO list_members (list_id, username) VALUES ($1, $2)
        ON CONFLICT (list_id, lower(username)) DO NOTHING
@@ -569,7 +624,7 @@ app.post('/api/lists/:id/members', async (req, res) => {
     );
     if (!rows.length) return res.status(409).json({ error: `@${canonical} is already a member` });
     notify(list.id, req);
-    res.json({ member: rows[0] });
+    res.json({ member: rows[0], unverified: !answered });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1027,16 +1082,6 @@ async function seedDemoListFor(user) {
       `INSERT INTO list_members (list_id, username) VALUES ($1, 'staging-demo-user')`,
       [shared.id]
     );
-    // The invite box only offers handles from known_users, which is
-    // staging:private and therefore empty here — the tester adds themself just
-    // by loading the app, but a typeahead needs somebody to find. Obviously
-    // fake, and enough of them to fill the list in the preview screenshot.
-    await client.query(
-      `INSERT INTO known_users (username) VALUES
-         ('staging-demo-user'), ('staging-demo-alex'),
-         ('staging-demo-sam'), ('staging-demo-priya')
-       ON CONFLICT (lower(username)) DO NOTHING`
-    );
     // A third list with due dates switched ON, so the dated presentation
     // (chips, "Today"/"Tomorrow", the overdue row) has data in staging.
     // Dates are relative to CURRENT_DATE so the seed never goes stale.
@@ -1135,33 +1180,12 @@ async function start() {
     CREATE UNIQUE INDEX IF NOT EXISTS items_client_op_id_key
       ON items (client_op_id) WHERE client_op_id IS NOT NULL;
 
-    -- Everyone the app has authenticated, which is what an invite is validated
-    -- against (issue #50). Private: a roster of who uses this app is more than
-    -- the single public username the platform already shows, and staging has
-    -- no business holding it.
-    CREATE TABLE IF NOT EXISTS known_users (
-      id SERIAL PRIMARY KEY,
-      username VARCHAR(255) NOT NULL,
-      first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    COMMENT ON TABLE known_users IS 'staging:private';
-    CREATE UNIQUE INDEX IF NOT EXISTS known_users_lower_username_idx
-      ON known_users (lower(username));
-
-    -- Backfill from the data that predates the table so everyone already using
-    -- the app is invitable the moment this deploys, rather than only after
-    -- they next open it. Idempotent: the unique index above absorbs re-runs,
-    -- and DISTINCT ON collapses handles that differ only by case.
-    INSERT INTO known_users (username)
-    SELECT DISTINCT ON (lower(u.username)) u.username FROM (
-      SELECT owner_username AS username FROM lists
-      UNION ALL SELECT username FROM list_members
-      UNION ALL SELECT created_by FROM items WHERE created_by IS NOT NULL
-      UNION ALL SELECT last_checked_by FROM items WHERE last_checked_by IS NOT NULL
-    ) u
-    WHERE u.username IS NOT NULL AND u.username <> ''
-    ORDER BY lower(u.username), u.username
-    ON CONFLICT (lower(username)) DO NOTHING;
+    -- The app used to keep its own roster of everyone it had authenticated
+    -- and validate invites against it, which rejected every real Usernode
+    -- account that had not opened Todo List yet (issue #50). Invites now read
+    -- the platform user directory instead, so nothing reads this table: no
+    -- foreign keys point at it and it held only derived data.
+    DROP TABLE IF EXISTS known_users;
 
     -- The default category is now the invisible "uncategorized" bucket.
     -- A renamed default was evidently being used as a real category, so it
