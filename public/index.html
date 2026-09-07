@@ -337,6 +337,26 @@
       content: ''; position: absolute; top: 0; left: 16px; right: 0;
       height: 1px; background: var(--separator); transform: scaleY(.5);
     }
+
+    /* Paired actions in a ☰ menu row — "Show all" / "Hide all" for completed
+       items (issue #68). Two explicit choices instead of one switch, with the
+       active one held selected and inert so the current view is legible. */
+    .seg {
+      display: inline-flex; gap: 2px; padding: 2px;
+      border-radius: 9px; background: var(--fill);
+    }
+    .seg-btn {
+      min-height: 30px; padding: 0 10px; border-radius: 7px;
+      font-size: 13px; line-height: 1; white-space: nowrap;
+      color: var(--label2);
+    }
+    /* The same control in the bottom sheet, where it is a thumb target
+       rather than a pointer one. */
+    .seg-lg .seg-btn { min-height: 36px; padding: 0 14px; font-size: 15px; }
+    .seg-btn[aria-pressed="true"] {
+      background: var(--card); color: var(--label); font-weight: 600;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .14);
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -403,6 +423,11 @@
     const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
+    // `?shot=menu` opens a list with the ☰ menu already down, because the
+    // completed-items actions (issue #68) only exist behind that tap.
+    // Display-only, like every other shot link: it opens the menu and
+    // writes nothing.
+    const shotMenu = shot === 'menu';
     const shotNostore = shot === 'nostore';
     // Screenshot/test deep link for the state this change introduces: a
     // finished category expanded to show the lane a dragged row now lands on
@@ -1292,7 +1317,10 @@
 
     // Shared class strings — the palette flows from the CSS variables.
     const BTN_SOFT = 'bg-[var(--fill)] text-[color:var(--label)]';
-    const DRAWER_ITEM = 'w-full flex items-center justify-between gap-3 text-left px-4 py-2.5 text-[15px] un-pressable hover:bg-[var(--fill)]';
+    // A menu row that is itself tappable, and the same row when it only holds
+    // controls (so the whole row doesn't press and highlight under them).
+    const DRAWER_ROW = 'w-full flex items-center justify-between gap-3 text-left px-4 py-2.5 text-[15px]';
+    const DRAWER_ITEM = DRAWER_ROW + ' un-pressable hover:bg-[var(--fill)]';
 
     // Closed-padlock icon marking private (owner-only) lists; inherits text color.
     function lockSvg(size) {
@@ -1406,13 +1434,25 @@
     function showCompleted() {
       return rawGet(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
     }
+    // "Show all" / "Hide all" render in both the desktop dropdown and the
+    // bottom sheet, and the menu stays open after a tap — so both copies are
+    // brought back in step rather than repainted.
+    function syncCompletedSegment() {
+      document.querySelectorAll('[data-done-seg]').forEach(b => {
+        const on = (b.dataset.doneSeg === 'show') === showCompleted();
+        b.setAttribute('aria-pressed', String(on));
+        b.disabled = on;
+      });
+    }
+
     function setShowCompleted(v) {
       rawSet(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
-      // The global switch resets any per-category overrides so flipping it
+      syncCompletedSegment();
+      // The global setting resets any per-category overrides so changing it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
-      // Fully-completed categories default to COLLAPSED, so "Show all done"
-      // gives them an explicit override — otherwise the switch would flip and
+      // Fully-completed categories default to COLLAPSED, so "Show all" gives
+      // them an explicit override — otherwise the selection would move and
       // nothing on screen would change.
       if (v && current) {
         for (const c of current.categories) {
@@ -1654,6 +1694,7 @@
       else if (shotCollapsed) loadShotCollapsed();
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
+      else if (shotMenu) loadShotMenu();
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -1901,6 +1942,19 @@
       if (!lists.length) { await loadHome(); }
       else { await loadList(lists[0].id); }
       openDiagnostics();
+    }
+
+    // Screenshot-state deep link — `/?shot=menu` opens a list with the ☰ menu
+    // dropped down, where "Show all" / "Hide all" live. The dropdown is opened
+    // directly rather than through toggleDrawer so the shot is the same on a
+    // touch device, where the menu is a bottom sheet.
+    async function loadShotMenu() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(lists[0].id);
+      const d = document.getElementById('drawer');
+      if (d) d.classList.remove('hidden');
     }
 
     // Screenshot-state deep link — `/?shot=undo` opens a list with the undo
@@ -2683,11 +2737,24 @@
     // Menu items shared by the desktop dropdown and the touch bottom sheet.
     function drawerItemsHtml(isOwner, sheet) {
       const c = sheet ? 'sheet-row un-pressable' : DRAWER_ITEM;
+      const rowC = sheet ? 'sheet-row' : DRAWER_ROW;
+      const done = showCompleted();
       return `
-        <label class="${c} cursor-pointer">
-          <span>Show completed</span>
-          <input type="checkbox" class="un-switch" ${showCompleted() ? 'checked' : ''} onchange="setShowCompleted(this.checked)">
-        </label>
+        <!-- Completed items: two named actions rather than one switch (issue
+             #68). Both write the same stored preference the switch did, and
+             the option already in effect renders selected and inert, so which
+             view is on reads at a glance instead of from a switch position. -->
+        <div class="${rowC}" role="group" aria-label="Completed items">
+          <span>Completed</span>
+          <span class="seg${sheet ? ' seg-lg' : ''}">
+            <button type="button" class="seg-btn un-pressable" data-done-seg="show"
+                    aria-pressed="${done}" ${done ? 'disabled' : ''}
+                    onclick="setShowCompleted(true)">Show all</button>
+            <button type="button" class="seg-btn un-pressable" data-done-seg="hide"
+                    aria-pressed="${!done}" ${done ? '' : 'disabled'}
+                    onclick="setShowCompleted(false)">Hide all</button>
+          </span>
+        </div>
         ${isOwner && current ? `
         <!-- Off by default, per list, owner-only (issue #38). The class rather
              than an id: this markup renders twice (dropdown + bottom sheet). -->

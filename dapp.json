@@ -207,6 +207,18 @@
       "path": "/?shot=nocache",
       "expectSelector": "#offline-chip:not(.hidden)",
       "expectText": "nothing saved on this device yet"
+    },
+    {
+      "name": "Completed items offer separate show all and hide all actions",
+      "path": "/?shot=menu",
+      "expectSelector": "#drawer:not(.hidden) .seg [data-done-seg=\"show\"] + [data-done-seg=\"hide\"]",
+      "expectText": "Hide all"
+    },
+    {
+      "name": "The completed view already in effect renders selected and inert",
+      "path": "/?shot=menu",
+      "expectSelector": "#drawer [data-done-seg=\"show\"][aria-pressed=\"true\"][disabled]",
+      "expectText": "Show all"
     }
   ],
   "visibility": {
