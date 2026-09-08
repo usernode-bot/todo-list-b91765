@@ -337,12 +337,6 @@
       content: ''; position: absolute; top: 0; left: 16px; right: 0;
       height: 1px; background: var(--separator); transform: scaleY(.5);
     }
-
-    /* Marks the menu row that is already in effect (issue #68) — the tick a
-       platform menu uses for the selected one of a set. Held in the layout
-       rather than added and removed, so the rows never shift. */
-    .row-check { color: var(--tint); font-size: 15px; line-height: 1; visibility: hidden; }
-    [aria-checked="true"] > .row-check { visibility: visible; }
   </style>
 </head>
 <body class="min-h-screen">
@@ -1417,25 +1411,15 @@
     function showCompleted() {
       return rawGet(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
     }
-    // The two rows render in both the desktop dropdown and the bottom sheet,
-    // and the menu stays open after a tap — so the tick is moved on both
-    // copies rather than repainting the menu under the finger.
-    function syncCompletedRows() {
-      document.querySelectorAll('[data-done-row]').forEach(b => {
-        const on = (b.dataset.doneRow === 'show') === showCompleted();
-        b.setAttribute('aria-checked', String(on));
-      });
-    }
 
     function setShowCompleted(v) {
       rawSet(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
-      syncCompletedRows();
       // The global setting resets any per-category overrides so changing it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
       // Fully-completed categories default to COLLAPSED, so "Show all
-      // completed" gives them an explicit override — otherwise the tick would
-      // move and nothing on screen would change.
+      // completed" gives them an explicit override — otherwise tapping it
+      // would change nothing on screen.
       if (v && current) {
         for (const c of current.categories) {
           if (isCatFullyDone(c.id)) setCatCollapsed(c.id, false);
@@ -2719,23 +2703,16 @@
     // Menu items shared by the desktop dropdown and the touch bottom sheet.
     function drawerItemsHtml(isOwner, sheet) {
       const c = sheet ? 'sheet-row un-pressable' : DRAWER_ITEM;
-      const done = showCompleted();
       return `
-        <!-- Completed items: two separate actions, a row each, sitting in the
-             menu like every other action (issue #68) rather than one switch or
-             one paired control. Both write the same stored preference the old
-             switch did; a tick marks the one already in effect, which is how
-             the rest of the menu would say it. -->
-        <button type="button" role="menuitemradio" aria-checked="${done}"
-                data-done-row="show" class="${c}" onclick="setShowCompleted(true)">
-          <span>Show all completed</span>
-          <span class="row-check" aria-hidden="true">✓</span>
-        </button>
-        <button type="button" role="menuitemradio" aria-checked="${!done}"
-                data-done-row="hide" class="${c}" onclick="setShowCompleted(false)">
-          <span>Hide all completed</span>
-          <span class="row-check" aria-hidden="true">✓</span>
-        </button>
+        <!-- Completed items: two plain actions, a row each, indistinguishable
+             from the actions below them (issue #68). Both write the same
+             stored preference the old switch did, and neither carries a
+             selected state — they read as things you do, not a setting whose
+             position you have to interpret. -->
+        <button type="button" data-done-row="show" class="${c}"
+                onclick="setShowCompleted(true)">Show all completed</button>
+        <button type="button" data-done-row="hide" class="${c}"
+                onclick="setShowCompleted(false)">Hide all completed</button>
         ${isOwner && current ? `
         <!-- Off by default, per list, owner-only (issue #38). The class rather
              than an id: this markup renders twice (dropdown + bottom sheet). -->

@@ -209,16 +209,16 @@
       "expectText": "nothing saved on this device yet"
     },
     {
-      "name": "Completed items get a menu row each, not one paired control",
+      "name": "Completed items get a plain menu row each",
       "path": "/?shot=menu",
       "expectSelector": "#drawer:not(.hidden) button[data-done-row=\"show\"] + button[data-done-row=\"hide\"]",
-      "expectText": "Hide all completed"
+      "expectText": "Show all completed"
     },
     {
-      "name": "The completed view already in effect is the row that is ticked",
+      "name": "Both completed rows stay tappable, with neither held selected",
       "path": "/?shot=menu",
-      "expectSelector": "#drawer button[data-done-row=\"show\"][aria-checked=\"true\"] .row-check",
-      "expectText": "Show all completed"
+      "expectSelector": "#drawer button[data-done-row=\"hide\"]:not([disabled]):not([aria-checked])",
+      "expectText": "Hide all completed"
     }
   ],
   "visibility": {
