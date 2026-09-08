@@ -209,16 +209,16 @@
       "expectText": "nothing saved on this device yet"
     },
     {
-      "name": "Completed items offer separate show all and hide all actions",
+      "name": "Completed items get a menu row each, not one paired control",
       "path": "/?shot=menu",
-      "expectSelector": "#drawer:not(.hidden) .seg [data-done-seg=\"show\"] + [data-done-seg=\"hide\"]",
-      "expectText": "Hide all"
+      "expectSelector": "#drawer:not(.hidden) button[data-done-row=\"show\"] + button[data-done-row=\"hide\"]",
+      "expectText": "Hide all completed"
     },
     {
-      "name": "The completed view already in effect renders selected and inert",
+      "name": "The completed view already in effect is the row that is ticked",
       "path": "/?shot=menu",
-      "expectSelector": "#drawer [data-done-seg=\"show\"][aria-pressed=\"true\"][disabled]",
-      "expectText": "Show all"
+      "expectSelector": "#drawer button[data-done-row=\"show\"][aria-checked=\"true\"] .row-check",
+      "expectText": "Show all completed"
     }
   ],
   "visibility": {

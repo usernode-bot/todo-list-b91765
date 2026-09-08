@@ -338,25 +338,11 @@
       height: 1px; background: var(--separator); transform: scaleY(.5);
     }
 
-    /* Paired actions in a ☰ menu row — "Show all" / "Hide all" for completed
-       items (issue #68). Two explicit choices instead of one switch, with the
-       active one held selected and inert so the current view is legible. */
-    .seg {
-      display: inline-flex; gap: 2px; padding: 2px;
-      border-radius: 9px; background: var(--fill);
-    }
-    .seg-btn {
-      min-height: 30px; padding: 0 10px; border-radius: 7px;
-      font-size: 13px; line-height: 1; white-space: nowrap;
-      color: var(--label2);
-    }
-    /* The same control in the bottom sheet, where it is a thumb target
-       rather than a pointer one. */
-    .seg-lg .seg-btn { min-height: 36px; padding: 0 14px; font-size: 15px; }
-    .seg-btn[aria-pressed="true"] {
-      background: var(--card); color: var(--label); font-weight: 600;
-      box-shadow: 0 1px 2px rgba(0, 0, 0, .14);
-    }
+    /* Marks the menu row that is already in effect (issue #68) — the tick a
+       platform menu uses for the selected one of a set. Held in the layout
+       rather than added and removed, so the rows never shift. */
+    .row-check { color: var(--tint); font-size: 15px; line-height: 1; visibility: hidden; }
+    [aria-checked="true"] > .row-check { visibility: visible; }
   </style>
 </head>
 <body class="min-h-screen">
@@ -1317,10 +1303,7 @@
 
     // Shared class strings — the palette flows from the CSS variables.
     const BTN_SOFT = 'bg-[var(--fill)] text-[color:var(--label)]';
-    // A menu row that is itself tappable, and the same row when it only holds
-    // controls (so the whole row doesn't press and highlight under them).
-    const DRAWER_ROW = 'w-full flex items-center justify-between gap-3 text-left px-4 py-2.5 text-[15px]';
-    const DRAWER_ITEM = DRAWER_ROW + ' un-pressable hover:bg-[var(--fill)]';
+    const DRAWER_ITEM = 'w-full flex items-center justify-between gap-3 text-left px-4 py-2.5 text-[15px] un-pressable hover:bg-[var(--fill)]';
 
     // Closed-padlock icon marking private (owner-only) lists; inherits text color.
     function lockSvg(size) {
@@ -1434,26 +1417,25 @@
     function showCompleted() {
       return rawGet(SHOW_COMPLETED_KEY) !== 'false'; // default: shown
     }
-    // "Show all" / "Hide all" render in both the desktop dropdown and the
-    // bottom sheet, and the menu stays open after a tap — so both copies are
-    // brought back in step rather than repainted.
-    function syncCompletedSegment() {
-      document.querySelectorAll('[data-done-seg]').forEach(b => {
-        const on = (b.dataset.doneSeg === 'show') === showCompleted();
-        b.setAttribute('aria-pressed', String(on));
-        b.disabled = on;
+    // The two rows render in both the desktop dropdown and the bottom sheet,
+    // and the menu stays open after a tap — so the tick is moved on both
+    // copies rather than repainting the menu under the finger.
+    function syncCompletedRows() {
+      document.querySelectorAll('[data-done-row]').forEach(b => {
+        const on = (b.dataset.doneRow === 'show') === showCompleted();
+        b.setAttribute('aria-checked', String(on));
       });
     }
 
     function setShowCompleted(v) {
       rawSet(SHOW_COMPLETED_KEY, v ? 'true' : 'false');
-      syncCompletedSegment();
+      syncCompletedRows();
       // The global setting resets any per-category overrides so changing it
       // always visibly applies everywhere.
       for (const k of Object.keys(catDoneOverrides)) delete catDoneOverrides[k];
-      // Fully-completed categories default to COLLAPSED, so "Show all" gives
-      // them an explicit override — otherwise the selection would move and
-      // nothing on screen would change.
+      // Fully-completed categories default to COLLAPSED, so "Show all
+      // completed" gives them an explicit override — otherwise the tick would
+      // move and nothing on screen would change.
       if (v && current) {
         for (const c of current.categories) {
           if (isCatFullyDone(c.id)) setCatCollapsed(c.id, false);
@@ -1945,7 +1927,7 @@
     }
 
     // Screenshot-state deep link — `/?shot=menu` opens a list with the ☰ menu
-    // dropped down, where "Show all" / "Hide all" live. The dropdown is opened
+    // dropped down, where the two completed-items rows live. It is opened
     // directly rather than through toggleDrawer so the shot is the same on a
     // touch device, where the menu is a bottom sheet.
     async function loadShotMenu() {
@@ -2737,24 +2719,23 @@
     // Menu items shared by the desktop dropdown and the touch bottom sheet.
     function drawerItemsHtml(isOwner, sheet) {
       const c = sheet ? 'sheet-row un-pressable' : DRAWER_ITEM;
-      const rowC = sheet ? 'sheet-row' : DRAWER_ROW;
       const done = showCompleted();
       return `
-        <!-- Completed items: two named actions rather than one switch (issue
-             #68). Both write the same stored preference the switch did, and
-             the option already in effect renders selected and inert, so which
-             view is on reads at a glance instead of from a switch position. -->
-        <div class="${rowC}" role="group" aria-label="Completed items">
-          <span>Completed</span>
-          <span class="seg${sheet ? ' seg-lg' : ''}">
-            <button type="button" class="seg-btn un-pressable" data-done-seg="show"
-                    aria-pressed="${done}" ${done ? 'disabled' : ''}
-                    onclick="setShowCompleted(true)">Show all</button>
-            <button type="button" class="seg-btn un-pressable" data-done-seg="hide"
-                    aria-pressed="${!done}" ${done ? '' : 'disabled'}
-                    onclick="setShowCompleted(false)">Hide all</button>
-          </span>
-        </div>
+        <!-- Completed items: two separate actions, a row each, sitting in the
+             menu like every other action (issue #68) rather than one switch or
+             one paired control. Both write the same stored preference the old
+             switch did; a tick marks the one already in effect, which is how
+             the rest of the menu would say it. -->
+        <button type="button" role="menuitemradio" aria-checked="${done}"
+                data-done-row="show" class="${c}" onclick="setShowCompleted(true)">
+          <span>Show all completed</span>
+          <span class="row-check" aria-hidden="true">✓</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked="${!done}"
+                data-done-row="hide" class="${c}" onclick="setShowCompleted(false)">
+          <span>Hide all completed</span>
+          <span class="row-check" aria-hidden="true">✓</span>
+        </button>
         ${isOwner && current ? `
         <!-- Off by default, per list, owner-only (issue #38). The class rather
              than an id: this markup renders twice (dropdown + bottom sheet). -->
