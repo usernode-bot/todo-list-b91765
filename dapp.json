@@ -30,6 +30,11 @@
       "expectText": "staging-demo-user checked"
     },
     {
+      "name": "The landing page's link to the platform is a resolved origin",
+      "path": "/landing.html",
+      "expectSelector": "a[href^=\"https://\"]"
+    },
+    {
       "name": "Landing page renders the demo list on the shared theme",
       "path": "/landing.html",
       "expectSelector": ".un-group .todo-check",

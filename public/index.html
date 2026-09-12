@@ -74,7 +74,7 @@
        is the dependency, not the bytes: the public CDN is one outside host
        shared by the whole fleet, and when it is blocked or down every app it
        serves loads unstyled. -->
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-tailwind/v1/tailwind.js"></script>
+  <script src="/usernode-tailwind/v1/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
@@ -102,9 +102,9 @@
        screen transitions. theme.css (the brand palette + --un-* overrides,
        shared with landing.html) must come AFTER native.css so the theme
        overrides win. -->
-  <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
+  <link rel="stylesheet" href="/usernode-native/v1/native.css">
   <link rel="stylesheet" href="/theme.css">
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
+  <script src="/usernode-native/v1/native.js"></script>
   <!-- usernode-bridge — centrally hosted, never vendored. This app used no
        bridge API, so it shipped without the tag; it needs it now for one
        thing it cannot do for itself. The shell cannot see into this origin,
@@ -116,7 +116,7 @@
        a service worker is controlling this document, so a reload with no
        network is served from /sw.js's cache. Loading it also gives the app
        the rest of the platform API for free. -->
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-bridge/v1/bridge.js"></script>
+  <script src="/usernode-bridge/v1/bridge.js"></script>
   <style>
     /* The brand palette, --un-* kit overrides, Fraunces title rule, .tinted
        and the .todo-check checkbox live in /theme.css — shared with the

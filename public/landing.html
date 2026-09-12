@@ -69,7 +69,7 @@
   })();
   </script>
   <!-- Centrally hosted Tailwind runtime — see the note in index.html. -->
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-tailwind/v1/tailwind.js"></script>
+  <script src="/usernode-tailwind/v1/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
@@ -87,9 +87,9 @@
   <!-- Same engine as the app (public/index.html): the hosted usernode-native
        kit plus the shared /theme.css. theme.css must come AFTER native.css
        so the --un-* theme overrides win. -->
-  <link rel="stylesheet" href="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.css">
+  <link rel="stylesheet" href="/usernode-native/v1/native.css">
   <link rel="stylesheet" href="/theme.css">
-  <script src="https://social-vibecoding.usernodelabs.org/usernode-native/v1/native.js"></script>
+  <script src="/usernode-native/v1/native.js"></script>
 </head>
 <body class="min-h-screen">
   <div class="max-w-2xl mx-auto p-4 pb-24">
@@ -103,7 +103,7 @@
     <div style="height: calc(3rem + env(safe-area-inset-top))"></div>
     <h1 id="landing-large-title" class="un-navbar-large pt-2 pb-2">Todo List</h1>
     <p class="text-[15px] max-w-[40ch]" style="color: var(--label2)">A shared todo app you can make perfect for yourself. This page is the real thing — check things off, add your own.</p>
-    <p class="text-[15px] mt-1.5" style="color: var(--label2)">Already have an account? <a class="tinted font-semibold" href="https://social-vibecoding.usernodelabs.org">Open it in Usernode</a>.</p>
+    <p class="text-[15px] mt-1.5" style="color: var(--label2)">Already have an account? <a class="tinted font-semibold" href="__USERNODE_PLATFORM_ORIGIN__">Open it in Usernode</a>.</p>
     <div id="list"></div>
     <p class="text-[12.5px] mt-4 px-2" style="color: var(--label3)">Nothing here is saved anywhere but this browser tab — your real lists start with an account, are private by default, and are yours for good.</p>
   </div>
@@ -112,7 +112,11 @@
     // A fully client-side demo list (spec §6.10): the pre-filled items ARE the
     // platform pitch, one claim per checkable line. State is in-session only.
     var KEY = 'todo:landing-demo';
-    var CTA_URL = 'https://social-vibecoding.usernodelabs.org';
+    // Both links to the platform go through this placeholder, which server.js
+    // substitutes at boot from USERNODE_PLATFORM_ORIGIN. Nothing in this file
+    // names a platform hostname: one written down here is one that dies the
+    // next time the platform moves.
+    var CTA_URL = '__USERNODE_PLATFORM_ORIGIN__';
     var SEED = {
       name: 'Welcome',
       categories: [

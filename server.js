@@ -1,4 +1,5 @@
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
@@ -8,6 +9,41 @@ const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const USERNODE_JWT_PUBLIC_KEY = process.env.USERNODE_JWT_PUBLIC_KEY;
 const IS_STAGING = process.env.USERNODE_ENV === 'staging';
+
+// Where the platform itself lives, for the landing page's two "open it in
+// Usernode" links. The platform injects USERNODE_PLATFORM_ORIGIN into every
+// app's environment, derived from the domain that deployment actually runs on,
+// and reading it is the whole point: a platform hostname written into this repo
+// is a hostname that goes stale the next time the platform moves — which is
+// exactly what happened, and what left these links pointing at a host that no
+// longer answers. The literal below is only the standalone-deploy fallback.
+//
+// Validated rather than trusted: the value is interpolated into an href and
+// into a JS string on the landing page, so anything that is not a plain http(s)
+// origin is discarded instead of being written into the markup.
+const PLATFORM_ORIGIN_FALLBACK = 'https://my.onhomeroom.com';
+const PLATFORM_ORIGIN = (() => {
+  const raw = String(process.env.USERNODE_PLATFORM_ORIGIN || '').trim().replace(/\/+$/, '');
+  try {
+    const u = new URL(raw);
+    if ((u.protocol === 'https:' || u.protocol === 'http:') && u.origin === raw) return raw;
+  } catch (_) { /* unset or unparseable — fall through */ }
+  if (raw) console.warn('USERNODE_PLATFORM_ORIGIN is not a plain origin; ignoring it:', raw);
+  return PLATFORM_ORIGIN_FALLBACK;
+})();
+
+// The landing page is the only templated file, so it is rendered once at boot
+// rather than per request. Read eagerly: a missing or unreadable template
+// should fail the container immediately, not on the first logged-out visitor.
+const LANDING_HTML = fs
+  .readFileSync(path.join(__dirname, 'public', 'landing.html'), 'utf8')
+  .split('__USERNODE_PLATFORM_ORIGIN__')
+  .join(PLATFORM_ORIGIN);
+
+function sendLanding(res) {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.type('html').send(LANDING_HTML);
+}
 
 // Set by the shutdown handler at the bottom of this file; /health flips to 503
 // as soon as the container starts draining.
@@ -940,6 +976,14 @@ app.delete('/api/items/:id', async (req, res) => {
   }
 });
 
+// The landing page is the app's one templated file, so it is served by a route
+// rather than off the static handler below — which would hand out the raw
+// template with __USERNODE_PLATFORM_ORIGIN__ still in it. It needs naming
+// explicitly because /landing.html is fetched directly as well as through the
+// catch-all: the service worker caches it by that path, and a dapp.json check
+// loads it.
+app.get('/landing.html', (_req, res) => sendLanding(res));
+
 // index:false so `/` falls through to the auth-aware catch-all below —
 // otherwise the static middleware hands the app shell to logged-out
 // visitors, whose first API call then dies with "Not authenticated".
@@ -975,7 +1019,7 @@ app.get('*', (req, res) => {
   // because it is the one the app itself is loaded from.
   res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   if (!req.user) {
-    return res.sendFile(path.join(__dirname, 'public', 'landing.html'));
+    return sendLanding(res);
   }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
