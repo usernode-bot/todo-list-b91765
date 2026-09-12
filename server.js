@@ -32,17 +32,28 @@ const PLATFORM_ORIGIN = (() => {
   return PLATFORM_ORIGIN_FALLBACK;
 })();
 
-// The landing page is the only templated file, so it is rendered once at boot
-// rather than per request. Read eagerly: a missing or unreadable template
-// should fail the container immediately, not on the first logged-out visitor.
-const LANDING_HTML = fs
-  .readFileSync(path.join(__dirname, 'public', 'landing.html'), 'utf8')
-  .split('__USERNODE_PLATFORM_ORIGIN__')
-  .join(PLATFORM_ORIGIN);
+// Three files carry the placeholder, so all three are rendered once at boot
+// rather than per request. Read eagerly: an unreadable template should fail the
+// container immediately, not on the first visitor.
+function renderTemplate(file) {
+  return fs
+    .readFileSync(path.join(__dirname, 'public', file), 'utf8')
+    .split('__USERNODE_PLATFORM_ORIGIN__')
+    .join(PLATFORM_ORIGIN);
+}
+
+const LANDING_HTML = renderTemplate('landing.html');
+const INDEX_HTML = renderTemplate('index.html');
+const SW_JS = renderTemplate('sw.js');
 
 function sendLanding(res) {
   res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   res.type('html').send(LANDING_HTML);
+}
+
+function sendShell(res) {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.type('html').send(INDEX_HTML);
 }
 
 // Set by the shutdown handler at the bottom of this file; /health flips to 503
@@ -96,7 +107,9 @@ app.get('/sw.js', (_req, res) => {
   res.set('Cache-Control', 'no-cache, must-revalidate');
   res.set('Service-Worker-Allowed', '/');
   res.type('application/javascript');
-  res.sendFile(path.join(__dirname, 'public', 'sw.js'));
+  // Rendered, not sent off disk: the worker precaches the platform's files by
+  // absolute URL, and that origin is injected like it is in the two HTML files.
+  res.send(SW_JS);
 });
 
 // ---------------------------------------------------------------------------
@@ -984,6 +997,12 @@ app.delete('/api/items/:id', async (req, res) => {
 // loads it.
 app.get('/landing.html', (_req, res) => sendLanding(res));
 
+// Same reason, and this one matters more: /index.html is what the service
+// worker precaches as the offline shell, so a raw template here would save a
+// copy with the placeholder baked in and every offline load would come up with
+// no styling at all.
+app.get('/index.html', (_req, res) => sendShell(res));
+
 // index:false so `/` falls through to the auth-aware catch-all below —
 // otherwise the static middleware hands the app shell to logged-out
 // visitors, whose first API call then dies with "Not authenticated".
@@ -1021,7 +1040,7 @@ app.get('*', (req, res) => {
   if (!req.user) {
     return sendLanding(res);
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  sendShell(res);
 });
 
 // ---------------------------------------------------------------------------

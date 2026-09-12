@@ -69,7 +69,7 @@
   })();
   </script>
   <!-- Centrally hosted Tailwind runtime — see the note in index.html. -->
-  <script src="/usernode-tailwind/v1/tailwind.js"></script>
+  <script src="__USERNODE_PLATFORM_ORIGIN__/usernode-tailwind/v1/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class', future: { hoverOnlyWhenSupported: true } }</script>
   <script>
     // Apply the theme before first paint to avoid a flash. Explicit choice in
@@ -87,9 +87,9 @@
   <!-- Same engine as the app (public/index.html): the hosted usernode-native
        kit plus the shared /theme.css. theme.css must come AFTER native.css
        so the --un-* theme overrides win. -->
-  <link rel="stylesheet" href="/usernode-native/v1/native.css">
+  <link rel="stylesheet" href="__USERNODE_PLATFORM_ORIGIN__/usernode-native/v1/native.css">
   <link rel="stylesheet" href="/theme.css">
-  <script src="/usernode-native/v1/native.js"></script>
+  <script src="__USERNODE_PLATFORM_ORIGIN__/usernode-native/v1/native.js"></script>
 </head>
 <body class="min-h-screen">
   <div class="max-w-2xl mx-auto p-4 pb-24">

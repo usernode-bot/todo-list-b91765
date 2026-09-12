@@ -20,8 +20,14 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
-const SW_SRC = fs.readFileSync(path.join(root, 'public', 'sw.js'), 'utf8');
-const INDEX = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+// server.js substitutes the platform's origin into sw.js and index.html at
+// boot, so the tests read them the same way — the raw templates are not what
+// any browser ever runs.
+const PLATFORM = 'https://platform.example';
+const render = (...p) => fs.readFileSync(path.join(root, ...p), 'utf8')
+  .split('__USERNODE_PLATFORM_ORIGIN__').join(PLATFORM);
+const SW_SRC = render('public', 'sw.js');
+const INDEX = render('public', 'index.html');
 const ORIGIN = 'https://todo-list-b91765.example';
 
 // Load sw.js and hand back its captured listeners plus the caches it saw.
@@ -181,50 +187,49 @@ test('a token-less load never clears per-user data', () => {
     'and a token-less load falls back to the remembered user rather than a fresh anonymous namespace');
 });
 
-// ── the platform's own files, which are same-origin now ─────────────────
+// ── the platform's own files ────────────────────────────────────────────
 //
-// They used to arrive from an absolute platform hostname, so ASSET_HOSTS was
-// what let the worker cache them. Reaching them by relative path made them
-// same-origin requests, which the worker refuses by default — everything
-// same-origin has to be named in an allowlist. Getting the tags right and the
-// worker wrong is a silent regression: online it looks perfect, and the first
-// offline load comes up with no stylesheet and no bridge.
+// They are matched by the INJECTED origin rather than by a hostname this file
+// names, so these cases are what prove the injection is actually load-bearing:
+// with the substitution broken, PLATFORM_ORIGIN is a literal placeholder, no
+// URL ever matches it, and the worker quietly stops caching the kit — which
+// looks perfect online and comes up with no stylesheet and no bridge offline.
 test('the platform kit is served from cache on an offline load', async () => {
   const { listeners, store } = loadWorker();
   const m = SW_SRC.match(/const CACHE_VERSION = '([^']+)'/);
   store.set(m[1] + '-assets', new Map([
-    [ORIGIN + '/usernode-native/v1/native.css', { body: 'KIT', ok: true }],
+    [PLATFORM + '/usernode-native/v1/native.css', { body: 'KIT', ok: true }],
   ]));
 
-  const r = dispatch(listeners, { url: ORIGIN + '/usernode-native/v1/native.css' });
+  const r = dispatch(listeners, { url: PLATFORM + '/usernode-native/v1/native.css' });
   assert.equal(r.claimed, true,
-    'a same-origin platform asset must be claimed by the worker, not passed to a network that is down');
+    'a platform asset must be claimed by the worker, not passed to a network that is down');
   assert.equal((await r.responded).body, 'KIT', 'and answered from the cache');
 });
 
 test('the platform assets keep their own cache, separate from the app shell', async () => {
-  // Same origin as the app now, but still not the app's files: a shell bump
-  // should not have to reason about them, and vice versa.
+  // Not the app's files: a shell bump should not have to reason about them.
   // staleWhileRevalidate clones the response before caching it, and writes the
   // clone on a detached promise — so the fake needs a clone() and the write
   // needs a turn of the event loop to land.
   const network = () => { const r = { body: 'NET', ok: true }; r.clone = () => r; return r; };
   const { listeners, store } = loadWorker({ network });
   const m = SW_SRC.match(/const CACHE_VERSION = '([^']+)'/);
-  const r = dispatch(listeners, { url: ORIGIN + '/usernode-bridge/v1/bridge.js' });
+  const r = dispatch(listeners, { url: PLATFORM + '/usernode-bridge/v1/bridge.js' });
   await r.responded;
   await new Promise(done => setImmediate(done));
-  assert.ok(store.get(m[1] + '-assets')?.has(ORIGIN + '/usernode-bridge/v1/bridge.js'),
+  assert.ok(store.get(m[1] + '-assets')?.has(PLATFORM + '/usernode-bridge/v1/bridge.js'),
     'the bridge is revalidated into the asset cache');
-  assert.ok(!store.get(m[1] + '-shell')?.has(ORIGIN + '/usernode-bridge/v1/bridge.js'),
+  assert.ok(!store.get(m[1] + '-shell')?.has(PLATFORM + '/usernode-bridge/v1/bridge.js'),
     'and never into the shell cache');
 });
 
 test('an unrelated same-origin path is still left alone', () => {
-  // The allowlist gained a prefix rule; it must not have become "anything that
-  // looks platform-ish". /explorer-api/* is the path that must never be cached.
+  // The prefix rule must not have become "anything that looks platform-ish",
+  // and it is scoped to the platform's origin — the same paths on THIS origin
+  // are not the platform's files. /explorer-api/* must never be cached.
   const { listeners } = loadWorker({ network: () => ({ body: 'NET', ok: true }) });
-  for (const p of ['/explorer-api/status', '/usernode-something-else', '/sw.js']) {
+  for (const p of ['/explorer-api/status', '/usernode-native/v1/native.js', '/sw.js']) {
     assert.equal(dispatch(listeners, { url: ORIGIN + p }).claimed, false,
       `${p} must go straight to the network`);
   }

@@ -14,12 +14,15 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
-// v7: the platform's hosted assets moved from an absolute platform hostname to
-// this app's own origin. The bump is what makes that reach people who already
-// have the app installed: every v6 cache holds entries keyed by the old
-// hostname, which no longer answers, and activate drops them — so no returning
-// user keeps trying to boot the shell from a dead host.
-const CACHE_VERSION = 'todo-v7';
+// v8: v7 moved the platform's files to a relative path on this app's own
+// origin. That routing turned out to be best-effort platform infrastructure —
+// when its shared asset backend cannot be reconciled the app's Ingress simply
+// omits those paths, which is what the v7 checks caught: 39 of 40 red, the kit
+// never booting. They are addressed by absolute URL again, but the origin is
+// INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
+// go stale the way the hostname before v7 did. The bump drops the v7 caches,
+// whose entries are keyed by paths that 404.
+const CACHE_VERSION = 'todo-v8';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -39,24 +42,25 @@ const PRECACHE = [SHELL_URL, '/theme.css', '/favicon.svg'];
 // accident; anything not named here goes straight to the network.
 const CACHEABLE_PATHS = new Set([SHELL_URL, '/theme.css', '/favicon.svg', '/landing.html']);
 
-// The platform's hosted files. They are reached by RELATIVE path — the platform
-// serves /usernode-bridge/, /usernode-native/ and /usernode-tailwind/ from this
-// app's own hostname — so they are same-origin requests now and have to be
-// named in an allowlist like any other. Naming them by PREFIX rather than
-// adding four entries to CACHEABLE_PATHS keeps the two ideas apart: that set is
-// this app's own files, and a /v2/ of any kit would otherwise silently stop
-// being cached.
+// The platform's own origin, substituted by server.js at boot from
+// USERNODE_PLATFORM_ORIGIN — this file is served by a route, not off disk, for
+// exactly that reason. Nothing here names a hostname, so a platform domain move
+// is absorbed on the next deploy instead of silently emptying these caches.
+const PLATFORM_ORIGIN = '__USERNODE_PLATFORM_ORIGIN__';
+
+// Matched by full URL prefix rather than by hostname: it keeps the platform's
+// three asset trees together as one idea, and a /v2/ of any of them keeps being
+// cached instead of silently dropping out of an exact-path list.
 const HOSTED_PREFIXES = ['/usernode-bridge/', '/usernode-native/', '/usernode-tailwind/'];
-const isHostedAsset = (pathname) => HOSTED_PREFIXES.some(p => pathname.startsWith(p));
+const isHostedAsset = (href) => HOSTED_PREFIXES.some(p => href.startsWith(PLATFORM_ORIGIN + p));
 
 // Cross-origin hosts whose assets are worth keeping for an offline load. Kept
 // deliberately tight: opaque cross-origin entries are padded heavily against
 // the storage quota.
+// The platform's own files are cross-origin too, but they are matched by
+// injected origin in isHostedAsset rather than listed here — this list is for
+// hosts genuinely written down in the app.
 const ASSET_HOSTS = [
-  // Only the fonts are cross-origin now. The platform's own files used to be
-  // listed here under its hostname; they come from this origin instead, and are
-  // handled by HOSTED_PREFIXES above. Naming a platform hostname here is what
-  // broke the app when that hostname moved.
   'fonts.googleapis.com',
   'fonts.gstatic.com',
 ];
@@ -80,37 +84,35 @@ const HOSTED_ASSETS = [
   '/usernode-native/v1/native.js',
   '/usernode-tailwind/v1/tailwind.js',
   '/usernode-bridge/v1/bridge.js',
-];
+].map(p => PLATFORM_ORIGIN + p);
 
-// A hard deadline on the hosted fetches. These share this app's hostname but not
-// its backend — the platform serves them — so they can still be slow or missing
-// on their own. Without a deadline, installing then holds the install event open
-// for as long as the network wants, and until install resolves there is no
-// active worker, so a reload in that window gets no offline shell at all. The
-// app's own precache below is the part that must not be delayed.
+// A hard deadline on the hosted fetches. Without one, installing while the
+// platform is slow or unreachable holds the install event open for as long as
+// the network takes to give up — and until install resolves there is no active
+// worker, so a reload in that window gets no offline shell at all. The
+// same-origin precache below is the part that must not be delayed.
 const HOSTED_FETCH_TIMEOUT_MS = 6000;
 
 function fetchWithDeadline(url) {
   const ctl = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = setTimeout(() => { if (ctl) ctl.abort(); }, HOSTED_FETCH_TIMEOUT_MS);
-  // No `no-cors`: these are same-origin, so the response is a real one whose
-  // status we can check. Opaque responses were the old cross-origin shape, and
-  // they are both uninspectable and padded heavily against the storage quota.
-  return fetch(url, { cache: 'reload', ...(ctl ? { signal: ctl.signal } : {}) })
+  // Cross-origin, so `no-cors`: the response is opaque, which is all a <link>
+  // or a <script> needs.
+  return fetch(url, { mode: 'no-cors', cache: 'reload', ...(ctl ? { signal: ctl.signal } : {}) })
     .finally(() => clearTimeout(timer));
 }
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(SHELL_CACHE);
-    // Best-effort and deadlined — a platform route that is slow or not yet
-    // answering must not stop, or even slow, this app's own shell being
-    // precached.
+    // Best-effort and deadlined — an unreachable platform must not stop, or
+    // even slow, this app's own shell being precached.
     const assets = await caches.open(ASSET_CACHE);
     await Promise.all(HOSTED_ASSETS.map(async url => {
       try {
         const res = await fetchWithDeadline(url);
-        if (res && res.ok) await assets.put(url, res.clone());
+        // An opaque response reports ok:false and status 0 by design.
+        if (res && (res.ok || res.type === 'opaque')) await assets.put(url, res.clone());
       } catch (_) { /* unreachable or too slow — the online path fills it in */ }
     }));
     // Individually, not addAll: one unavailable file must not fail the whole
@@ -233,17 +235,17 @@ self.addEventListener('fetch', event => {
   }
 
   if (sameOrigin) {
-    // The platform's own files share this origin but are not this app's, so
-    // they keep their own cache — the split ASSET_CACHE always drew, back when
-    // the only thing that told them apart was the hostname.
-    if (isHostedAsset(url.pathname)) {
-      event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetch(req)));
-      return;
-    }
     // Explicit allowlist — see CACHEABLE_PATHS. /sw.js is deliberately absent
     // (a worker that caches itself can never be replaced).
     if (!CACHEABLE_PATHS.has(url.pathname)) return;
     event.respondWith(staleWhileRevalidate(SHELL_CACHE, req).catch(() => fetch(req)));
+    return;
+  }
+
+  // The platform's three asset trees, matched by injected origin rather than by
+  // a hostname this file names.
+  if (isHostedAsset(url.href)) {
+    event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetch(req)));
     return;
   }
 
