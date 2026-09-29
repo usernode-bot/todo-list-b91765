@@ -1243,15 +1243,6 @@
                due_date: null, due_time: null };
     }
 
-    // Where the server would move a row inside its section after a toggle
-    // (bottom of the section it lands in), so the optimistic position matches
-    // what the next refetch will say.
-    function sectionBottom(items, categoryId, checked, exceptId) {
-      return items
-        .filter(i => i.category_id === categoryId && !!i.checked === checked && i.id !== exceptId)
-        .reduce((m, i) => Math.max(m, i.sort_order), 0) + 1;
-    }
-
     // Re-projects still-unsent changes onto a freshly fetched payload. Without
     // this, any refetch (background reconcile, pull-to-refresh, a live update
     // from another member) would visibly undo an edit that is still queued.
@@ -1280,8 +1271,7 @@
           const it = d.items[idx], checked = !!op.body.checked;
           d.items[idx] = { ...it, checked,
             completed_at: checked ? (it.completed_at || new Date().toISOString()) : null,
-            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by,
-            sort_order: sectionBottom(d.items, it.category_id, checked, it.id) };
+            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by };
         }
       }
       return d;
@@ -3651,12 +3641,10 @@
                      last_checked_by: item.last_checked_by, sort_order: item.sort_order };
       if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
                     path: '/api/items/' + id, body: { checked }, undo })) return;
-      // Mirror the server's move-to-section-bottom so the row lands exactly
-      // where the eventual refetch will put it.
+      // Keep the item's existing sort position, matching the server.
       item.checked = checked;
       item.completed_at = checked ? new Date().toISOString() : null;
       item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
-      item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
       record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
       // Keep a newly fully-done category expanded only if its done items

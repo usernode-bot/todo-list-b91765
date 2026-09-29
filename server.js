@@ -895,9 +895,8 @@ app.post('/api/categories/:id/items', async (req, res) => {
   }
 });
 
-// Edit text, move to another category, and/or toggle checked. Checking moves
-// the item to the bottom of the checked section of its category; unchecking
-// moves it to the bottom of the unchecked section. A category move drops the
+// Edit text, move to another category, and/or toggle checked. Checking and
+// unchecking keep the item's existing sort position; a category move drops the
 // item at the end of the matching section of the target category.
 app.patch('/api/items/:id', async (req, res) => {
   try {
@@ -935,9 +934,7 @@ app.patch('/api/items/:id', async (req, res) => {
         `UPDATE items SET
            checked = $1,
            completed_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
-           last_checked_by = $4,
-           sort_order = COALESCE((SELECT MAX(sort_order) FROM items
-                                   WHERE category_id = $2 AND checked = $1 AND id <> $3), 0) + 1
+           last_checked_by = $4
          WHERE id = $3`,
         [req.body.checked, categoryId, item.id, req.user.username]
       );
