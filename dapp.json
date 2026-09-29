@@ -222,6 +222,11 @@
       "path": "/?shot=menu",
       "expectSelector": "#drawer button[data-done-row=\"hide\"]:not([disabled]):not([aria-checked])",
       "expectText": "Hide all completed"
+    },
+    {
+      "name": "Hide all completed closes a fully-completed category",
+      "path": "/?shot=hideall",
+      "expectSelector": ".cat-head .cat-toggle[aria-expanded=false]"
     }
   ],
   "visibility": {
