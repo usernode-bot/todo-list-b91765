@@ -14,6 +14,10 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
+// v9: every network fetch the worker itself waits on now carries a hard
+// 6-second abort deadline. A connection that is dropping all packets never
+// reports a clean failure — it just goes quiet — so without the deadline the
+// install event and a token-less navigation could both hang indefinitely.
 // v8: v7 moved the platform's files to a relative path on this app's own
 // origin. That routing turned out to be best-effort platform infrastructure —
 // when its shared asset backend cannot be reconciled the app's Ingress simply
@@ -22,7 +26,7 @@
 // INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
 // go stale the way the hostname before v7 did. The bump drops the v7 caches,
 // whose entries are keyed by paths that 404.
-const CACHE_VERSION = 'todo-v8';
+const CACHE_VERSION = 'todo-v9';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -86,19 +90,26 @@ const HOSTED_ASSETS = [
   '/usernode-bridge/v1/bridge.js',
 ].map(p => PLATFORM_ORIGIN + p);
 
-// A hard deadline on the hosted fetches. Without one, installing while the
-// platform is slow or unreachable holds the install event open for as long as
-// the network takes to give up — and until install resolves there is no active
-// worker, so a reload in that window gets no offline shell at all. The
-// same-origin precache below is the part that must not be delayed.
-const HOSTED_FETCH_TIMEOUT_MS = 6000;
+// A hard deadline on every network fetch the worker itself waits on. Without
+// one, a connection that is dropping all packets never fails — the socket just
+// goes quiet — so installing while the platform is unreachable would hold the
+// install event open for as long as the network takes to give up (forever),
+// and until install resolves there is no active worker, so a reload in that
+// window gets no offline shell at all. The same reasoning applies to a
+// token-less navigation, where the network-first fetch must give way to the
+// cached shell, and to the stale-while-revalidate network leg, where the
+// no-cached-copy wait must end for the response fallback to fire.
+const NETWORK_FETCH_TIMEOUT_MS = 6000;
 
-function fetchWithDeadline(url) {
+function fetchWithDeadline(url, options = {}) {
   const ctl = typeof AbortController === 'function' ? new AbortController() : null;
-  const timer = setTimeout(() => { if (ctl) ctl.abort(); }, HOSTED_FETCH_TIMEOUT_MS);
-  // Cross-origin, so `no-cors`: the response is opaque, which is all a <link>
-  // or a <script> needs.
-  return fetch(url, { mode: 'no-cors', cache: 'reload', ...(ctl ? { signal: ctl.signal } : {}) })
+  const timer = setTimeout(() => { if (ctl) ctl.abort(); }, NETWORK_FETCH_TIMEOUT_MS);
+  // Merge the signal into whatever options the caller needs — the hosted
+  // install fetches pass `mode: 'no-cors'` (cross-origin, so the response is
+  // opaque, which is all a <link> or a <script> needs); the same-origin
+  // callers pass `cache: 'reload'` and inherit the request's own mode/headers
+  // from the Request itself.
+  return fetch(url, { ...options, ...(ctl ? { signal: ctl.signal } : {}) })
     .finally(() => clearTimeout(timer));
 }
 
@@ -110,7 +121,9 @@ self.addEventListener('install', event => {
     const assets = await caches.open(ASSET_CACHE);
     await Promise.all(HOSTED_ASSETS.map(async url => {
       try {
-        const res = await fetchWithDeadline(url);
+        // Cross-origin, so `no-cors`: the response is opaque, which is all a
+        // <link> or a <script> needs.
+        const res = await fetchWithDeadline(url, { mode: 'no-cors', cache: 'reload' });
         // An opaque response reports ok:false and status 0 by design.
         if (res && (res.ok || res.type === 'opaque')) await assets.put(url, res.clone());
       } catch (_) { /* unreachable or too slow — the online path fills it in */ }
@@ -119,7 +132,7 @@ self.addEventListener('install', event => {
     // install and leave the app with no service worker at all.
     await Promise.all(PRECACHE.map(async url => {
       try {
-        const res = await fetch(url, { cache: 'reload' });
+        const res = await fetchWithDeadline(url, { cache: 'reload' });
         if (res && res.ok) await cache.put(url, res.clone());
       } catch (_) { /* stays uncached; the fetch handler fills it later */ }
     }));
@@ -167,7 +180,7 @@ function revalidate(cacheName, request, response) {
 async function staleWhileRevalidate(cacheName, request) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
-  const network = fetch(request)
+  const network = fetchWithDeadline(request)
     .then(res => { revalidate(cacheName, request, res.clone()); return res; })
     .catch(err => { if (cached) return null; throw err; });
   if (cached) return cached;
@@ -219,7 +232,7 @@ self.addEventListener('fetch', event => {
         }
       }
       try {
-        return await fetch(req);
+        return await fetchWithDeadline(req);
       } catch (_) {
         const cached = await caches.match(SHELL_URL, { cacheName: SHELL_CACHE });
         if (cached) return cached;
@@ -238,18 +251,18 @@ self.addEventListener('fetch', event => {
     // Explicit allowlist — see CACHEABLE_PATHS. /sw.js is deliberately absent
     // (a worker that caches itself can never be replaced).
     if (!CACHEABLE_PATHS.has(url.pathname)) return;
-    event.respondWith(staleWhileRevalidate(SHELL_CACHE, req).catch(() => fetch(req)));
+    event.respondWith(staleWhileRevalidate(SHELL_CACHE, req).catch(() => fetchWithDeadline(req)));
     return;
   }
 
   // The platform's three asset trees, matched by injected origin rather than by
   // a hostname this file names.
   if (isHostedAsset(url.href)) {
-    event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetch(req)));
+    event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetchWithDeadline(req)));
     return;
   }
 
   if (ASSET_HOSTS.includes(url.hostname)) {
-    event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetch(req)));
+    event.respondWith(staleWhileRevalidate(ASSET_CACHE, req).catch(() => fetchWithDeadline(req)));
   }
 });

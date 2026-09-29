@@ -31,7 +31,10 @@ const INDEX = render('public', 'index.html');
 const ORIGIN = 'https://todo-list-b91765.example';
 
 // Load sw.js and hand back its captured listeners plus the caches it saw.
-function loadWorker({ shellCached = true, network = null } = {}) {
+// `timers` overrides the sandbox's setTimeout/clearTimeout (defaulting to the
+// real ones), so a deadline test does not have to wait out the production
+// 6-second window.
+function loadWorker({ shellCached = true, network = null, timers = {} } = {}) {
   const listeners = {};
   const store = new Map();               // cacheName -> Map(url -> response)
   const cacheFor = (name) => {
@@ -47,11 +50,13 @@ function loadWorker({ shellCached = true, network = null } = {}) {
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     URL, Response: class { constructor(b, i) { this.body = b; Object.assign(this, i); } },
-    AbortController, setTimeout, clearTimeout, Promise,
+    AbortController, Promise,
+    setTimeout: timers.setTimeout || setTimeout,
+    clearTimeout: timers.clearTimeout || clearTimeout,
     // Default: the network is unreachable, which is the offline case. Pass
     // `network` to model a REACHABLE one — the difference test 5 turns on.
-    fetch: async (req) => {
-      if (network) return network(typeof req === 'string' ? req : req.url);
+    fetch: async (req, init) => {
+      if (network) return network(typeof req === 'string' ? req : req.url, init);
       throw new Error('offline');
     },
     caches: {
@@ -161,6 +166,35 @@ test('a token-less navigation still falls back to the shell when truly offline',
   const r = dispatch(listeners, { url: ORIGIN + '/', mode: 'navigate' });
   const res = await r.responded;
   assert.equal(res.body, 'SHELL', 'offline, the saved shell is the only thing there is');
+});
+
+test('a token-less navigation falls back to the cached shell promptly when the connection hangs', async () => {
+  // A dropped-packet connection is worse than "offline": fetch never rejects,
+  // the socket just goes quiet. Model it with a fetch that never settles on
+  // its own but does honour the abort signal the worker hands it.
+  let aborted = false;
+  const hangingFetch = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => {
+      aborted = true;
+      reject(new Error('The operation was aborted'));
+    });
+  });
+  // Fire the 6-second production deadline almost immediately.
+  const timers = {
+    setTimeout: (fn, ms) => setTimeout(fn, 20),
+    clearTimeout,
+  };
+  const { listeners } = loadWorker({ network: hangingFetch, timers });
+  const started = Date.now();
+  const r = dispatch(listeners, { url: ORIGIN + '/', mode: 'navigate' });
+  assert.equal(r.claimed, true, 'the navigation is claimed');
+  const res = await r.responded;
+  const elapsed = Date.now() - started;
+  assert.equal(res.body, 'SHELL', 'the hanging fetch gives way to the cached shell');
+  assert.equal(aborted, true,
+    'the abort ended the wait — not a lucky network error');
+  assert.ok(elapsed < 1000,
+    `the whole wait must resolve well under the 6-second deadline (took ${elapsed}ms)`);
 });
 
 test('cross-origin requests outside the asset hosts are left alone', () => {
