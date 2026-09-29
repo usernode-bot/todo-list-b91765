@@ -187,6 +187,12 @@ test('a token-less load never clears per-user data', () => {
     'and a token-less load falls back to the remembered user rather than a fresh anonymous namespace');
 });
 
+test('checking a category\'s last item auto-collapses it', () => {
+  assert.match(INDEX,
+    /if \(checked && !searchActive\(\) && isCatFullyDone\(item\.category_id\)\) setCatCollapsed\(item\.category_id, true\);/,
+    'toggleItem collapses a category immediately once its last open item is checked');
+});
+
 // ── the platform's own files ────────────────────────────────────────────
 //
 // They are matched by the INJECTED origin rather than by a hostname this file
