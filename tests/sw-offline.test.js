@@ -31,7 +31,7 @@ const INDEX = render('public', 'index.html');
 const ORIGIN = 'https://todo-list-b91765.example';
 
 // Load sw.js and hand back its captured listeners plus the caches it saw.
-function loadWorker({ shellCached = true, network = null } = {}) {
+function loadWorker({ shellCached = true, network = null, instantTimeouts = false } = {}) {
   const listeners = {};
   const store = new Map();               // cacheName -> Map(url -> response)
   const cacheFor = (name) => {
@@ -44,15 +44,33 @@ function loadWorker({ shellCached = true, network = null } = {}) {
     keys: async () => [...cacheFor(name).keys()],
     add: async () => {},
   });
+  const realSetTimeout = setTimeout;
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     URL, Response: class { constructor(b, i) { this.body = b; Object.assign(this, i); } },
-    AbortController, setTimeout, clearTimeout, Promise,
+    AbortController,
+    // instantTimeouts shrinks every deadline inside the worker to a tick, so a
+    // test can prove install resolves *within* the deadline without sleeping
+    // the full six seconds. The real timer bookkeeping stays.
+    setTimeout: instantTimeouts ? (fn, _ms) => realSetTimeout(fn, 0) : setTimeout,
+    clearTimeout, Promise,
     // Default: the network is unreachable, which is the offline case. Pass
     // `network` to model a REACHABLE one — the difference test 5 turns on.
-    fetch: async (req) => {
-      if (network) return network(typeof req === 'string' ? req : req.url);
-      throw new Error('offline');
+    // A real fetch rejects when its signal aborts and otherwise settles on
+    // its own; the fake has to model that, or an abort could never cut a
+    // black-holed connection short the way it does in a browser.
+    fetch: (req, init) => {
+      const attempt = network
+        ? Promise.resolve().then(() => network(typeof req === 'string' ? req : req.url, init))
+        : Promise.reject(new Error('offline'));
+      const signal = init && init.signal;
+      if (!signal) return attempt;
+      return Promise.race([
+        attempt,
+        new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')));
+        }),
+      ]);
     },
     caches: {
       open: async (n) => fakeCache(n),
@@ -233,4 +251,41 @@ test('an unrelated same-origin path is still left alone', () => {
     assert.equal(dispatch(listeners, { url: ORIGIN + p }).claimed, false,
       `${p} must go straight to the network`);
   }
+});
+
+// ── install on a connection dropping all packets ────────────────────────
+//
+// The device looks connected but nothing gets through: the precache fetch
+// neither resolves nor rejects, it just hangs until the TCP stack gives up.
+// Until install resolves there is no active worker, so a reload in that
+// window gets nothing to open — the reported failure (issue #66). The
+// deadline that already protects the hosted assets has to protect the app's
+// own shell files too, or a dead connection holds install open past it.
+test('install resolves within the deadline when a precache fetch never settles', async () => {
+  // A promise that never settles models the black-holed socket exactly: not
+  // an error (which would be the fast offline case, already handled), silence.
+  const { listeners } = loadWorker({
+    shellCached: false,
+    instantTimeouts: true,
+    network: () => new Promise(() => {}),
+  });
+  assert.ok(listeners.install, 'the install listener is still registered');
+
+  let release;
+  const waitUntilRan = new Promise((done) => { release = done; });
+  const event = { waitUntil: (p) => { p.then(release, release); } };
+  const started = Date.now();
+  listeners.install(event);
+
+  // A generous multiple of the (shrunken) deadline: if the abort works,
+  // install lands here in a tick or two. If the fetch is left bare, this
+  // assertion never runs at all — the test times out instead, which is the
+  // regression the deadline prevents.
+  const winner = await Promise.race([
+    waitUntilRan.then(() => 'install'),
+    new Promise(done => setTimeout(() => done('timeout'), 2000)),
+  ]);
+  assert.equal(winner, 'install',
+    'a never-settling precache fetch must not hold the install event open');
+  assert.ok(Date.now() - started < 2000, 'and it does so promptly, not at the TCP timeout');
 });

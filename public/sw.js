@@ -14,6 +14,11 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
+// v9: the same-origin precache and refreshShell() go through the same
+// 6-second deadline as the hosted assets. A connection that drops all packets
+// (the device looks connected, nothing gets through) used to hold the bare
+// install-time fetch open until the TCP stack gave up — no active worker, no
+// offline shell (issue #66). The bump drops the v8 caches.
 // v8: v7 moved the platform's files to a relative path on this app's own
 // origin. That routing turned out to be best-effort platform infrastructure —
 // when its shared asset backend cannot be reconciled the app's Ingress simply
@@ -22,7 +27,7 @@
 // INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
 // go stale the way the hostname before v7 did. The bump drops the v7 caches,
 // whose entries are keyed by paths that 404.
-const CACHE_VERSION = 'todo-v8';
+const CACHE_VERSION = 'todo-v9';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
@@ -86,11 +91,11 @@ const HOSTED_ASSETS = [
   '/usernode-bridge/v1/bridge.js',
 ].map(p => PLATFORM_ORIGIN + p);
 
-// A hard deadline on the hosted fetches. Without one, installing while the
-// platform is slow or unreachable holds the install event open for as long as
-// the network takes to give up — and until install resolves there is no active
-// worker, so a reload in that window gets no offline shell at all. The
-// same-origin precache below is the part that must not be delayed.
+// A hard deadline on every install-time fetch, hosted and same-origin alike.
+// Without one, installing while the platform is slow or unreachable — or on a
+// connection dropping all packets — holds the install event open for as long
+// as the network takes to give up — and until install resolves there is no
+// active worker, so a reload in that window gets no offline shell at all.
 const HOSTED_FETCH_TIMEOUT_MS = 6000;
 
 function fetchWithDeadline(url) {
@@ -115,11 +120,14 @@ self.addEventListener('install', event => {
         if (res && (res.ok || res.type === 'opaque')) await assets.put(url, res.clone());
       } catch (_) { /* unreachable or too slow — the online path fills it in */ }
     }));
+    // Same deadline, same best-effort shape: a file that cannot be fetched in
+    // time stays uncached and is filled in later by the fetch handler, but it
+    // must not delay skipWaiting on a black-holed connection.
     // Individually, not addAll: one unavailable file must not fail the whole
     // install and leave the app with no service worker at all.
     await Promise.all(PRECACHE.map(async url => {
       try {
-        const res = await fetch(url, { cache: 'reload' });
+        const res = await fetchWithDeadline(url);
         if (res && res.ok) await cache.put(url, res.clone());
       } catch (_) { /* stays uncached; the fetch handler fills it later */ }
     }));
@@ -130,7 +138,7 @@ self.addEventListener('install', event => {
 // Re-pull the shell so a redeployed index.html replaces the cached copy.
 async function refreshShell() {
   try {
-    const res = await fetch(SHELL_URL, { cache: 'reload' });
+    const res = await fetchWithDeadline(SHELL_URL);
     if (res && res.ok) await (await caches.open(SHELL_CACHE)).put(SHELL_URL, res.clone());
   } catch (_) { /* offline — the existing copy stays */ }
 }
