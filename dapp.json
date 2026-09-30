@@ -110,14 +110,20 @@
     {
       "name": "A finished category keeps a lane to drop items into",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .active-items button.empty-note.done-note",
+      "expectSelector": ".cat-section .item-flow button.empty-note.done-note",
       "expectText": "All done — add another"
     },
     {
-      "name": "The finished category still shows its completed row beside that lane",
+      "name": "The finished category shows its completed row in place above that lane",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .done-items .item-row[data-checked=\"1\"]",
+      "expectSelector": ".cat-section .item-flow .item-row[data-checked=\"1\"]",
       "expectText": "Renew the travel insurance"
+    },
+    {
+      "name": "A completed row renders between unchecked rows, not at the end",
+      "path": "/?shot=inplace",
+      "expectSelector": ".cat-section .un-swipe:has(.item-row[data-checked=\"1\"]) ~ .un-swipe:has(.item-row:not([data-checked=\"1\"]))",
+      "expectText": "Sunscreen"
     },
     {
       "name": "Undo is available in the list header after a change",
