@@ -3646,9 +3646,6 @@
     function toggleItem(id, checked) {
       const item = current.items.find(i => i.id === id);
       if (!item) return;
-      // Capture done-visibility first: checking the last open item flips the
-      // category to fully done, which defaults to collapsed.
-      const wasShowingDone = catShowDone(item.category_id);
       const undo = { checked: item.checked, completed_at: item.completed_at,
                      last_checked_by: item.last_checked_by, sort_order: item.sort_order };
       if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
@@ -3661,11 +3658,11 @@
       item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
       record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
-      // Keep a newly fully-done category expanded only if its done items
-      // were already visible, so the rows the user is looking at don't
-      // vanish mid-interaction. A category the user had collapsed stays
-      // collapsed — checking its last item must not pop it open.
-      if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
+      // Checking the last open item completes the category, so close it.
+      // setCatCollapsed drops any explicit "keep open" marker before storing
+      // the collapsed one, so even a category the user had pinned open folds.
+      // repaintCategory below renders the collapsed header.
+      if (checked && isCatFullyDone(item.category_id)) setCatCollapsed(item.category_id, true);
       repaintCategory(item.category_id);
     }
 
