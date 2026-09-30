@@ -205,19 +205,28 @@ test('a token-less load never clears per-user data', () => {
     'and a token-less load falls back to the remembered user rather than a fresh anonymous namespace');
 });
 
-// Issue #61: the strip used to paint itself with the inverted ink/band tokens,
-// which turn it into a bright light band in dark mode, and it was position:
-// fixed, so it stayed pinned while the screen scrolled away under it.
-test('the offline strip is a card-styled, in-flow sibling above #app', () => {
+// Issue #74: the strip must float as a fixed overlay instead of taking space
+// in the flow, so appearing and disappearing never pushes #app down. Its
+// card surface (issue #61) keeps dark mode safe, and its anchor is still
+// under the nav bar, or the safe-area inset when a screen renders without one.
+test('the offline strip is a card-styled fixed overlay that never pushes #app down', () => {
   const chip = INDEX.match(/#offline-chip \{[\s\S]*?\}/)[0];
   assert.match(chip, /background: var\(--card\); color: var\(--label\)/,
     'the strip must use the shared card surface so dark mode flips it with the rest of the app');
-  assert.doesNotMatch(chip, /position:\s*fixed/,
-    'the strip must scroll with the content, not stay pinned to the viewport');
+  assert.match(chip, /position:\s*fixed/,
+    'the strip must be an overlay so its appearance and disappearance never move the page');
   assert.doesNotMatch(INDEX, /body\.has-strip #app \{[^}]*padding-top/,
-    'the strip is in-flow now, so it owns its own clearance instead of the app padding');
-  assert.ok(INDEX.indexOf('id="offline-chip"') < INDEX.indexOf('id="app"'),
-    'the strip sits in the flow directly above #app so it moves with the screen');
+    'the strip floats over #app, so the app owns no clearance for it');
+  const navbar = INDEX.match(/body\.has-strip:not\(\.no-navbar\) #offline-chip \{[\s\S]*?\}/)[0];
+  assert.match(navbar, /\btop:/,
+    'with a nav bar the overlay pins below the fixed nav bar');
+  assert.doesNotMatch(navbar, /\bmargin-top:/,
+    'an overlay positions with top, not a flow margin');
+  const bare = INDEX.match(/body\.no-navbar #offline-chip \{[\s\S]*?\}/)[0];
+  assert.match(bare, /\btop:/,
+    'without a nav bar the overlay pins below the safe-area inset');
+  assert.doesNotMatch(bare, /\bmargin-top:/,
+    'an overlay positions with top, not a flow margin');
 });
 
 // ── the platform's own files ────────────────────────────────────────────
