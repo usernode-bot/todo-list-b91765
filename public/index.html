@@ -133,13 +133,11 @@
        touch it. Pinned directly under the fixed nav bar; deliberately NOT at
        the bottom, where the kit's toast HUD lives (the two used to overlap). */
     #offline-chip {
-      position: fixed; left: 0; right: 0;
-      top: calc(3rem + env(safe-area-inset-top));
       display: flex; align-items: center; justify-content: center;
-      background: var(--label); color: var(--bg);
+      background: var(--card); color: var(--label);
+      border-bottom: 1px solid var(--separator);
       font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
-      text-align: center; padding: 6px 14px; z-index: 70;
-      box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
+      text-align: center; padding: 6px 14px;
       pointer-events: none;
     }
     /* Own the hidden rule rather than leaning on Tailwind's .hidden — the CDN
@@ -147,14 +145,18 @@
     #offline-chip.hidden { display: none; }
     #offline-chip.tappable { pointer-events: auto; cursor: pointer; }
     #offline-chip.ok { background: var(--tint); color: #fff; }
-    /* The strip hangs under the fixed nav bar — but a screen can render
-       without one (an offline boot with nothing saved used to be exactly
-       that), and then a 3rem offset left it floating in open space with the
-       screen's own content behind it. Anchor it to the top instead whenever
-       there is no bar to sit under. */
-    body.no-navbar #offline-chip { top: env(safe-area-inset-top); }
-    /* Make room so the strip never covers the first row of content. */
-    body.has-strip #app { padding-top: 2.15rem; }
+    /* The strip now scrolls with the content, so its anchor is a margin in
+       the flow rather than a fixed top: below the fixed nav bar (which each
+       screen already reserves a spacer for), or below the safe-area inset
+       when a screen renders without one. The platform frame forwards the
+       real insets as --un-safe-inset-*, and bare env() keeps it exact
+       standalone. The strip itself owns the clearance, so #app needs none. */
+    body.has-strip:not(.no-navbar) #offline-chip {
+      margin-top: calc(3rem + env(safe-area-inset-top));
+    }
+    body.no-navbar #offline-chip {
+      margin-top: var(--un-safe-inset-top, env(safe-area-inset-top, 0px));
+    }
 
     /* Offline sync progress — Home only, pinned to the bottom. The status
        strip owns the top (under the nav bar); this owns the bottom, and the
@@ -340,8 +342,8 @@
   </style>
 </head>
 <body class="min-h-screen">
-  <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
   <div id="offline-chip" class="hidden" role="status" aria-live="polite" onclick="onStripTap()"></div>
+  <div id="app" class="max-w-2xl mx-auto p-4 pb-24"></div>
   <div id="sync-bar" class="hidden" role="status" aria-live="polite"></div>
 
   <script>
