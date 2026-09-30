@@ -187,6 +187,21 @@ test('a token-less load never clears per-user data', () => {
     'and a token-less load falls back to the remembered user rather than a fresh anonymous namespace');
 });
 
+// Issue #61: the strip used to paint itself with the inverted ink/band tokens,
+// which turn it into a bright light band in dark mode, and it was position:
+// fixed, so it stayed pinned while the screen scrolled away under it.
+test('the offline strip is a card-styled, in-flow sibling above #app', () => {
+  const chip = INDEX.match(/#offline-chip \{[\s\S]*?\}/)[0];
+  assert.match(chip, /background: var\(--card\); color: var\(--label\)/,
+    'the strip must use the shared card surface so dark mode flips it with the rest of the app');
+  assert.doesNotMatch(chip, /position:\s*fixed/,
+    'the strip must scroll with the content, not stay pinned to the viewport');
+  assert.doesNotMatch(INDEX, /body\.has-strip #app \{[^}]*padding-top/,
+    'the strip is in-flow now, so it owns its own clearance instead of the app padding');
+  assert.ok(INDEX.indexOf('id="offline-chip"') < INDEX.indexOf('id="app"'),
+    'the strip sits in the flow directly above #app so it moves with the screen');
+});
+
 // ── the platform's own files ────────────────────────────────────────────
 //
 // They are matched by the INJECTED origin rather than by a hostname this file

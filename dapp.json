@@ -74,9 +74,9 @@
       "expectText": "No one on Usernode matches"
     },
     {
-      "name": "Offline status strip renders",
+      "name": "Offline status strip renders, in flow directly above the app",
       "path": "/?shot=offline",
-      "expectSelector": "#offline-chip",
+      "expectSelector": "#offline-chip + #app",
       "expectText": "showing saved copy"
     },
     {
