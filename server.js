@@ -775,11 +775,11 @@ app.post('/api/lists/:id/reorder-categories', async (req, res) => {
   }
 });
 
-// Persist a drag-and-drop reorder of items within one section (unchecked or
-// checked) of a category. Takes that section's full ordered array of item
-// ids; sort_order is assigned from array order. The checked and unchecked
-// sections keep independent sequences, which is fine — display always
-// filters by checked state before sorting.
+// Persist a drag-and-drop reorder of a category's items. Takes the category's
+// full ordered array of item ids as the client now displays them — checked and
+// unchecked rows interleaved in one flow (request #75); sort_order is assigned
+// from array order. Rows the client is not showing (completed items hidden by
+// the visibility setting) are simply absent and keep their stored sort_order.
 app.post('/api/categories/:id/reorder-items', async (req, res) => {
   try {
     const { category, role } = await getCategoryAccess(req.params.id, req.user);
@@ -895,9 +895,9 @@ app.post('/api/categories/:id/items', async (req, res) => {
   }
 });
 
-// Edit text, move to another category, and/or toggle checked. Checking moves
-// the item to the bottom of the checked section of its category; unchecking
-// moves it to the bottom of the unchecked section. A category move drops the
+// Edit text, move to another category, and/or toggle checked. Checking only
+// ticks the item — it keeps its place in the list (request #75); the row's
+// visual style is the client's business. A category move still drops the
 // item at the end of the matching section of the target category.
 app.patch('/api/items/:id', async (req, res) => {
   try {
@@ -935,11 +935,9 @@ app.patch('/api/items/:id', async (req, res) => {
         `UPDATE items SET
            checked = $1,
            completed_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
-           last_checked_by = $4,
-           sort_order = COALESCE((SELECT MAX(sort_order) FROM items
-                                   WHERE category_id = $2 AND checked = $1 AND id <> $3), 0) + 1
-         WHERE id = $3`,
-        [req.body.checked, categoryId, item.id, req.user.username]
+           last_checked_by = $3
+         WHERE id = $2`,
+        [req.body.checked, item.id, req.user.username]
       );
     }
 
