@@ -120,6 +120,12 @@
       "expectText": "Renew the travel insurance"
     },
     {
+      "name": "Hide all completed closes the fully-completed category that Show all completed had expanded",
+      "path": "/?shot=hidedone",
+      "expectSelector": ".cat-head .cat-toggle[aria-expanded=false] ~ .cat-count",
+      "expectText": "1 done"
+    },
+    {
       "name": "Undo is available in the list header after a change",
       "path": "/?shot=undo",
       "expectSelector": "#undo-btn[aria-disabled=false]:not([disabled])"

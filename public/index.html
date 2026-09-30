@@ -417,6 +417,14 @@
     // so neither the expand nor the drop is reachable by navigation alone.
     // Pure UI state — it flips the same local preference the chevron does.
     const shotDrop = shot === 'drop';
+    // Screenshot/test deep link for issue #78: hide all completed with every
+    // finished category expanded, the state this change is about. The
+    // "Show all completed" tap that must have come first is a tap, and
+    // "Hide all completed" hides its own menu behind it — neither is
+    // reachable by navigation alone. Display-only, like every other shot
+    // link: it flips the same real preferences those taps do and writes
+    // nothing to the database.
+    const shotHideDone = shot === 'hidedone';
 
     // Deadlines. Every request gets one: without them a stalled TCP connection
     // hangs the promise for as long as the browser's own timeout (often
@@ -1427,6 +1435,11 @@
           if (isCatFullyDone(c.id)) setCatCollapsed(c.id, false);
         }
       }
+      if (!v && current) {
+        for (const c of current.categories) {
+          if (isCatFullyDone(c.id)) setCatCollapsed(c.id, true);
+        }
+      }
       if (current) repaintAllCategories();
     }
 
@@ -1661,6 +1674,7 @@
       else if (shotNocache) loadShotNocache();
       else if (shotCollapsed) loadShotCollapsed();
       else if (shotDrop) loadShotDrop();
+      else if (shotHideDone) loadShotHideDone();
       else if (shotDiag) loadShotDiag();
       else if (shotMenu) loadShotMenu();
       else loadHome();
@@ -1910,6 +1924,26 @@
       if (!lists.length) { await loadHome(); }
       else { await loadList(lists[0].id); }
       openDiagnostics();
+    }
+
+    // Screenshot-state deep link — `/?shot=hidedone` reproduces issue #78:
+    // every finished category expanded (as "Show all completed" leaves it),
+    // then "Hide all completed" tapped. setShowCompleted(false) has to close
+    // the fully-completed ones, or each keeps rendering as an empty card.
+    // Opens the first list with a fully-completed category, by shape.
+    async function loadShotHideDone() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && catDoneIn(d, c))));
+      if (!current) return;
+      // "Show all completed" first: it expands every fully-completed
+      // category and leaves an explicit keep-open marker behind — the exact
+      // stale state the hide-tap now has to clean up.
+      setShowCompleted(true);
+      setShowCompleted(false);
+      repaintAllCategories();
     }
 
     // Screenshot-state deep link — `/?shot=menu` opens a list with the ☰ menu
