@@ -208,16 +208,31 @@ test('a token-less load never clears per-user data', () => {
 // Issue #61: the strip used to paint itself with the inverted ink/band tokens,
 // which turn it into a bright light band in dark mode, and it was position:
 // fixed, so it stayed pinned while the screen scrolled away under it.
-test('the offline strip is a card-styled, in-flow sibling above #app', () => {
+// Issue #74: the fix for #61 put it in the flow, so every time it appeared the
+// whole page jumped down, and jumped back up when it went. It is now absolutely
+// positioned: out of the flow (the page never moves) but still document-
+// relative, so it scrolls away with the content rather than pinning.
+test('the offline strip is a card-styled overlay that never moves the page', () => {
   const chip = INDEX.match(/#offline-chip \{[\s\S]*?\}/)[0];
   assert.match(chip, /background: var\(--card\); color: var\(--label\)/,
     'the strip must use the shared card surface so dark mode flips it with the rest of the app');
+  assert.match(chip, /position:\s*absolute/,
+    'the strip must be out of the flow so showing or hiding it does not push the page');
   assert.doesNotMatch(chip, /position:\s*fixed/,
     'the strip must scroll with the content, not stay pinned to the viewport');
+  const z = Number((chip.match(/z-index:\s*(\d+)/) || [])[1]);
+  assert.ok(z > 0 && z < 100,
+    'above screen content, but under the kit nav bar (z-index 100) it scrolls beneath');
   assert.doesNotMatch(INDEX, /body\.has-strip #app \{[^}]*padding-top/,
-    'the strip is in-flow now, so it owns its own clearance instead of the app padding');
-  assert.ok(INDEX.indexOf('id="offline-chip"') < INDEX.indexOf('id="app"'),
-    'the strip sits in the flow directly above #app so it moves with the screen');
+    'the app reserves no space for the strip, or the page would still move');
+  const navAnchor = INDEX.match(/body\.has-strip:not\(\.no-navbar\) #offline-chip \{[^}]*\}/)[0];
+  const safeAnchor = INDEX.match(/body\.no-navbar #offline-chip \{[^}]*\}/)[0];
+  for (const rule of [navAnchor, safeAnchor]) {
+    assert.match(rule, /\btop:/, 'the strip is anchored with top, under the nav bar or the safe area');
+    assert.doesNotMatch(rule, /margin-top/, 'a margin would take layout space again');
+  }
+  assert.match(navAnchor, /top: calc\(3rem \+ env\(safe-area-inset-top\)\)/,
+    'the nav-bar anchor matches the spacer each screen reserves under the bar');
 });
 
 // ── the platform's own files ────────────────────────────────────────────

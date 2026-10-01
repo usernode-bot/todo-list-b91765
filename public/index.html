@@ -130,9 +130,15 @@
     .x-close:hover { color: var(--label); }
 
     /* Offline / syncing status strip — lives outside #app so re-renders never
-       touch it. Pinned directly under the fixed nav bar; deliberately NOT at
-       the bottom, where the kit's toast HUD lives (the two used to overlap). */
+       touch it. Sits directly under the fixed nav bar; deliberately NOT at
+       the bottom, where the kit's toast HUD lives (the two used to overlap).
+       It is position: absolute, out of the flow, so showing or hiding it
+       never moves the page (issue #74), yet it still scrolls away with the
+       content instead of staying pinned to the viewport (issue #61). z-index
+       50 keeps it above screen content and under the kit's nav bar (100),
+       so it slides beneath the bar when the screen scrolls. */
     #offline-chip {
+      position: absolute; left: 0; right: 0; z-index: 50;
       display: flex; align-items: center; justify-content: center;
       background: var(--card); color: var(--label);
       border-bottom: 1px solid var(--separator);
@@ -145,17 +151,17 @@
     #offline-chip.hidden { display: none; }
     #offline-chip.tappable { pointer-events: auto; cursor: pointer; }
     #offline-chip.ok { background: var(--tint); color: #fff; }
-    /* The strip now scrolls with the content, so its anchor is a margin in
-       the flow rather than a fixed top: below the fixed nav bar (which each
-       screen already reserves a spacer for), or below the safe-area inset
-       when a screen renders without one. The platform frame forwards the
-       real insets as --un-safe-inset-*, and bare env() keeps it exact
-       standalone. The strip itself owns the clearance, so #app needs none. */
+    /* Its anchor is a document-relative top, not a margin in the flow:
+       below the fixed nav bar (the same offset each screen's nav spacer
+       reserves), or below the safe-area inset when a screen renders without
+       one. The platform frame forwards the real insets as --un-safe-inset-*,
+       and bare env() keeps it exact standalone. Neither the strip nor #app
+       reserves space for it — it overlays the top edge of the content. */
     body.has-strip:not(.no-navbar) #offline-chip {
-      margin-top: calc(3rem + env(safe-area-inset-top));
+      top: calc(3rem + env(safe-area-inset-top));
     }
     body.no-navbar #offline-chip {
-      margin-top: var(--un-safe-inset-top, env(safe-area-inset-top, 0px));
+      top: var(--un-safe-inset-top, env(safe-area-inset-top, 0px));
     }
 
     /* Offline sync progress — Home only, pinned to the bottom. The status
