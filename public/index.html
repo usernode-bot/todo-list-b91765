@@ -1515,8 +1515,86 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const opening = catCollapsed(catId);
+      // One slide per category: a tap while an open/close animation is still
+      // running is ignored, so it can't queue up or reverse the body mid-slide.
+      const section = document.getElementById('cat-' + catId);
+      if (section && section.dataset.catAnim) return;
+      // Reduced motion (or a browser without the Web Animations API) keeps
+      // today's instant snap, exactly like flipRows and the chevron's own
+      // transition do.
+      if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function') {
+        setCatCollapsed(catId, !opening);
+        repaintCategory(catId);
+        return;
+      }
+      if (opening) {
+        // Expand FIRST so the freshly rendered .un-group exists to measure,
+        // then slide it from 0 to its natural height. Header + count (rendered
+        // collapsed) swap to the expanded header the instant the tap lands,
+        // same as the chevron rotation starts immediately.
+        setCatCollapsed(catId, false);
+        repaintCategory(catId);
+        // repaintCategory swapped the section node (outerHTML), so measure
+        // the freshly rendered one, not the detached collapsed section.
+        const live = document.getElementById('cat-' + catId);
+        const body = live ? live.querySelector('.un-group') : null;
+        const full = body ? body.getBoundingClientRect().height : 0;
+        // A zero-height body (or one that vanished mid-toggle because another
+        // code path repainted the section) has nothing to animate: flip done.
+        if (!live || !body || full < 1) return;
+        live.dataset.catAnim = '1';
+        slideCatBody(body, 0, full, () => {
+          delete live.dataset.catAnim;
+        });
+      } else {
+        // Collapse: measure the body BEFORE the state change, slide it shut
+        // while it keeps its current children (adder form included), and only
+        // then swap in the collapsed render with its "N items" count.
+        const body = section.querySelector('.un-group');
+        const full = body ? body.getBoundingClientRect().height : 0;
+        if (!body || full < 1) {
+          setCatCollapsed(catId, true);
+          repaintCategory(catId);
+          return;
+        }
+        section.dataset.catAnim = '1';
+        slideCatBody(body, full, 0, () => {
+          setCatCollapsed(catId, true);
+          repaintCategory(catId); // clears the marker with the section swap
+        });
+      }
+    }
+
+    // The category body's open/close slide. Same quick beat as the chevron's
+    // rotation (.18s ease) so the header and card read as one motion. Height
+    // only, with overflow hidden during the slide; both are inline and removed
+    // on finish so later content changes are never clipped. `done` runs once,
+    // however the animation ends: `finished` rejects on cancel, so the
+    // cleanup lives there too (decoration rule — the layout is already right
+    // if the animation never ran).
+    const CAT_ANIM_MS = 180;
+    const CAT_ANIM_EASE = 'ease';
+    function slideCatBody(body, from, to, done) {
+      body.style.overflow = 'hidden';
+      body.style.height = from + 'px';
+      let anim = null;
+      try {
+        anim = body.animate(
+          [{ height: from + 'px' }, { height: to + 'px' }],
+          { duration: CAT_ANIM_MS, easing: CAT_ANIM_EASE }
+        );
+      } catch (_) { /* instant fallback below */ }
+      const settle = () => {
+        body.style.overflow = '';
+        body.style.height = '';
+        done();
+      };
+      if (anim && anim.finished) {
+        anim.finished.then(settle, settle);
+      } else {
+        settle();
+      }
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
