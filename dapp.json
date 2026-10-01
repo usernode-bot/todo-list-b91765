@@ -28,6 +28,11 @@
       "expectText": "staging-demo-user checked"
     },
     {
+      "name": "Home shows shared-list removals in the activity line",
+      "path": "/",
+      "expectText": "staging-demo-user removed"
+    },
+    {
       "name": "The landing page's link to the platform is a resolved origin",
       "path": "/landing.html",
       "expectSelector": "a[href^=\"https://\"]"
