@@ -1790,12 +1790,15 @@
     // waiting to sync, a state that otherwise exists only for the moment a
     // change is in flight on a slow connection. Display-only: it forces the
     // marker on one row and writes nothing to the queue or the database.
+    // Picks its list by SHAPE (one with items) — a marker needs a row to sit
+    // on, and the demo lists share a created_at, so lists[0] is an accident
+    // of the tiebreaker (see firstListWhere).
     let shotPendingIds = null;
     async function loadShotPending() {
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const target = current.items.find(i => !i.checked) || current.items[0];
       shotPendingIds = new Set([target.id]);
@@ -1904,7 +1907,9 @@
     // Today that is "Demo: Due Dates", whose only category is the default
     // bucket, so a shot that needs a real category found none and rendered
     // nothing. loadShotEmpty above already picks this way; this is the same
-    // scan, factored out for the two loaders that needed it.
+    // scan, and every loader that needs a particular shape of list now asks
+    // through it — empty, collapsed, drop, pending and undo — so a new demo
+    // list cannot quietly take a shot over.
     async function firstListWhere(lists, wanted) {
       for (const l of lists) {
         let d = null;
@@ -2006,11 +2011,13 @@
     // Screenshot-state deep link — `/?shot=undo` opens a list with the undo
     // button live, which otherwise takes a mutation to reach. The entry it
     // stages describes a change already on screen, so nothing is written.
+    // Picks its list by SHAPE (one with items) for the same reason as
+    // loadShotPending above.
     async function loadShotUndo() {
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const item = current.items[0];
       undoStack = [{ kind: 'toggle', itemId: item.id,
