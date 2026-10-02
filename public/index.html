@@ -1795,7 +1795,9 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      // Pick by SHAPE, not position: the marker needs a row to sit on, and a
+      // list without items (the removal-event demo list) has none.
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const target = current.items.find(i => !i.checked) || current.items[0];
       shotPendingIds = new Set([target.id]);
@@ -2010,7 +2012,10 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      // Pick by SHAPE, not position: the staged entry needs a real item to
+      // point at, and a list without items (the removal-event demo list) has
+      // none.
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const item = current.items[0];
       undoStack = [{ kind: 'toggle', itemId: item.id,
