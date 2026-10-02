@@ -1795,7 +1795,7 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const target = current.items.find(i => !i.checked) || current.items[0];
       shotPendingIds = new Set([target.id]);
@@ -2010,7 +2010,7 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      await loadList(await firstListWhere(lists, d => d.items.length > 0));
       if (!current || !current.items.length) return;
       const item = current.items[0];
       undoStack = [{ kind: 'toggle', itemId: item.id,
