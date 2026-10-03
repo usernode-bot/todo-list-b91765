@@ -1233,25 +1233,16 @@
       return false;
     }
 
-    // Local stand-in for the server's insert (top of the unchecked section).
+    // Local stand-in for the server's insert (top of the category's list).
     // Used for EVERY add, not just offline ones: the row is drawn from this and
     // then adopts the server's id when the reply lands.
     function localNewItem(id, categoryId, text, items) {
       const min = (items || current.items)
-        .filter(i => i.category_id === categoryId && !i.checked)
+        .filter(i => i.category_id === categoryId)
         .reduce((m, i) => Math.min(m, i.sort_order), 1);
       return { id, category_id: categoryId, text, checked: false, sort_order: min - 1,
                completed_at: null, created_by: me, last_checked_by: null,
                due_date: null, due_time: null };
-    }
-
-    // Where the server would move a row inside its section after a toggle
-    // (bottom of the section it lands in), so the optimistic position matches
-    // what the next refetch will say.
-    function sectionBottom(items, categoryId, checked, exceptId) {
-      return items
-        .filter(i => i.category_id === categoryId && !!i.checked === checked && i.id !== exceptId)
-        .reduce((m, i) => Math.max(m, i.sort_order), 0) + 1;
     }
 
     // Re-projects still-unsent changes onto a freshly fetched payload. Without
@@ -1280,10 +1271,10 @@
             due_date: op.body.due_date, due_time: op.body.due_time };
         } else if (op.type === 'toggle') {
           const it = d.items[idx], checked = !!op.body.checked;
+          // No sort_order change: the server keeps a checked row in place too.
           d.items[idx] = { ...it, checked,
             completed_at: checked ? (it.completed_at || new Date().toISOString()) : null,
-            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by,
-            sort_order: sectionBottom(d.items, it.category_id, checked, it.id) };
+            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by };
         }
       }
       return d;
@@ -1641,8 +1632,8 @@
       if (openAdders.has(catId)) openAdders.delete(catId);
       else openAdders.add(catId);
       // Opening the adder on a collapsed category auto-expands it — both the
-      // whole-category collapse and the done-items one, so the row the user is
-      // about to add is somewhere they can see it.
+      // whole-category collapse and the done-rows visibility, so the row the
+      // user is about to add is somewhere they can see it.
       if (opening && catCollapsed(catId)) setCatCollapsed(catId, false);
       if (opening && !catShowDone(catId)) catDoneOverrides[catId] = true;
       repaintCategory(catId);
@@ -2579,31 +2570,46 @@
       }
     }
 
-    // Items of one section (unchecked or checked) of a category, in order.
-    // With due dates on, the order is chronological instead of manual: soonest
-    // first, undated last, ties falling back to the manual order. Sorted here on
-    // the client rather than in SQL so it holds for a cached list, an offline
-    // edit and a still-queued add exactly as it does for a fresh fetch.
+    // Display order for a category's items: sort_order, with id as the
+    // tiebreaker for rows that never got a number of their own. With due dates
+    // on, the order is chronological instead of manual: soonest first, undated
+    // last, ties falling back to the manual order. Sorted here on the client
+    // rather than in SQL so it holds for a cached list, an offline edit and a
+    // still-queued add exactly as it does for a fresh fetch.
+    function itemOrder(a, b) {
+      const manual = () => (a.sort_order - b.sort_order) || (a.id - b.id);
+      if (!datesOn()) return manual();
+      const ad = a.due_date || '', bd = b.due_date || '';
+      if (ad !== bd) {
+        if (!ad) return 1;   // undated sinks below everything with a date
+        if (!bd) return -1;
+        return ad < bd ? -1 : 1;
+      }
+      // Same day: a timed item comes before an all-day one.
+      const at = a.due_time || '', bt = b.due_time || '';
+      if (ad && at !== bt) {
+        if (!at) return 1;
+        if (!bt) return -1;
+        return at < bt ? -1 : 1;
+      }
+      return manual();
+    }
+
+    // Items of one section (unchecked or checked) of a category, in order —
+    // what the markdown export's active/completed grouping still wants.
     function sectionItems(catId, checked) {
-      const rows = current.items.filter(i => i.category_id === catId && !!i.checked === checked);
-      const manual = (a, b) => (a.sort_order - b.sort_order) || (a.id - b.id);
-      if (!datesOn()) return rows.sort(manual);
-      return rows.sort((a, b) => {
-        const ad = a.due_date || '', bd = b.due_date || '';
-        if (ad !== bd) {
-          if (!ad) return 1;   // undated sinks below everything with a date
-          if (!bd) return -1;
-          return ad < bd ? -1 : 1;
-        }
-        // Same day: a timed item comes before an all-day one.
-        const at = a.due_time || '', bt = b.due_time || '';
-        if (ad && at !== bt) {
-          if (!at) return 1;
-          if (!bt) return -1;
-          return at < bt ? -1 : 1;
-        }
-        return manual(a, b);
-      });
+      return current.items
+        .filter(i => i.category_id === catId && !!i.checked === checked)
+        .sort(itemOrder);
+    }
+
+    // ALL of a category's items as one sequence (issue #75): a checked row
+    // keeps the sort_order it was checked with, so it renders exactly where it
+    // sits in the list instead of moving to the end. The same comparator drives
+    // this and sectionItems — filtering, either before or after sorting, cannot
+    // change an item's rank.
+    function listItems(catId) {
+      return current.items.filter(i => i.category_id === catId).sort(itemOrder);
     }
 
     // --- due dates (issue #38) --------------------------------------------------
@@ -2942,10 +2948,10 @@
 
     function renderCategory(c) {
       // Active search: a matching category name shows all its items; otherwise
-      // both sections filter to matching item text, and a category with no
-      // matches disappears. Matching done items always render (bypassing
-      // catShowDone) without touching catDoneOverrides, so clearing the search
-      // restores the collapse state exactly.
+      // only matching item text shows, and a category with no matches
+      // disappears. Matching done items always render (bypassing catShowDone)
+      // without touching catDoneOverrides, so clearing the search restores the
+      // collapse state exactly.
       const searching = searchActive();
       const q = searchQ();
       // The default category is the invisible "uncategorized" bucket: no
@@ -2953,24 +2959,29 @@
       // rendered only when it has items. Its name never matches a search.
       const isBucket = !!c.is_default;
       const catMatches = searching && !isBucket && c.name.toLowerCase().includes(q);
-      let unchecked = sectionItems(c.id, false);
-      let checked = sectionItems(c.id, true);
+      // One sequence per category (issue #75): every item renders at its own
+      // position, ticked rows struck through where they sit.
+      const items = listItems(c.id);
+      let unchecked = items.filter(i => !i.checked);
+      let checked = items.filter(i => !!i.checked);
+      let visible = items;
       if (searching && !catMatches) {
+        visible = visible.filter(i => i.text.toLowerCase().includes(q));
         unchecked = unchecked.filter(i => i.text.toLowerCase().includes(q));
         checked = checked.filter(i => i.text.toLowerCase().includes(q));
-        if (!unchecked.length && !checked.length) return '';
+        if (!visible.length) return '';
       }
       const showDone = searching ? checked.length > 0 : catShowDone(c.id);
       const empty = !unchecked.length && !checked.length;
       if (isBucket && empty) return ''; // an empty bucket renders nothing
       const fullyDone = !unchecked.length && checked.length > 0;
-      // The active area always keeps a lane, even when everything in the
-      // category is ticked off — that lane is what a dragged row lands on
-      // (issue #51). Without it a finished category renders its active area
-      // `hidden` and offers the reorder kit nothing to hit, so a category
-      // holding a single done item — its whole card being that one item —
-      // couldn't be dragged into at all. Mid-search it stays out of the way:
-      // the filter, not the category, decides what is on screen there, and
+      // The card always keeps the "add another" row when nothing is open, even
+      // with everything ticked off — that row is what a dragged row lands on
+      // (issue #51). Without it a finished category offers the reorder kit
+      // nothing to hit, so a category holding a single done item — its whole
+      // card being that one item — couldn't be dragged into at all. Mid-search
+      // it stays out of the way: the filter, not the category, decides what is
+      // on screen there, and
       // reorder is off anyway.
       const activeLane = !unchecked.length && (empty || !searching);
       // Whole-category collapse. The invisible bucket has no header, so it has
@@ -3028,8 +3039,9 @@
                      onkeydown="if (event.key === 'Escape') toggleAdder(${c.id})" onblur="commitOnBlur(event)"
                      class="flex-1 bg-transparent text-[15px] focus:outline-none py-1" style="color: var(--label)">
             </form>` : ''}
-            <div class="active-items${unchecked.length || activeLane ? '' : ' hidden'}">
-              ${unchecked.map(renderItem).join('')}
+            <div class="cat-items">
+              ${(!searching && !showDone) ? unchecked.map(renderItem).join('')
+                                           : visible.map(renderItem).join('')}
               ${activeLane ? `
               <button type="button" onclick="emptyNoteTap(${c.id})" title="${empty ? 'Add the first item' : 'Add an item'}"
                       class="empty-note${empty ? '' : ' done-note'} un-group-row un-pressable un-touch-target w-full flex items-center gap-2.5 px-4 py-2.5 text-[13px] text-left cursor-pointer"
@@ -3038,18 +3050,17 @@
                 <span>${empty ? 'No items yet' : 'All done — add another'}</span>
               </button>` : ''}
             </div>
-            ${checked.length ? `
+            ${checked.length && !searching ? `
             <!-- The ONLY control for done-item visibility now that the header
                  chevron collapses the whole category. Rendered for every
                  category with completed items, finished ones included: an
                  expanded finished category needs a way back to hiding them
-                 that isn't "collapse the card". -->
-            ${searching ? '' : `
+                 that isn't "collapse the card". Checked rows render in place
+                 (issue #75), so the toggle is the card's footer row. -->
             <button onclick="toggleCatDone(${c.id})" title="${showDone ? 'Hide' : 'Show'} completed in this category"
                     class="un-group-row w-full flex items-center justify-between px-4 py-2 text-[13px]" style="color: var(--label2)">
               <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
-            </button>`}
-            ${showDone ? `<div class="done-items">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
+            </button>` : ''}
           </div>`}
         </section>`;
     }
@@ -3288,30 +3299,17 @@
       const id = +row.dataset.item;
       const item = current.items.find(i => i.id === id);
       if (!item) { refreshList(); return; }
-      const checked = !!item.checked;
       const toCat = +sec.dataset.cat;
       const fromCat = item.category_id;
-      // Reordering WITHIN a category still can't cross the done divider: the
-      // two sections are ordered separately, so a row dropped in the wrong one
-      // is meaningless and gets undone. A move INTO another category does mean
-      // something — the user is choosing the category, and the row belongs in
-      // whichever of its sections matches its own checked state — so the lane
-      // it landed in is ignored there. Demanding a matching lane is what made a
-      // category holding a single item undroppable (issue #51): one item is one
-      // section, so half of every drag into it landed in the "wrong" lane and
-      // sprang straight back out.
-      const landedInDone = !!el.closest('.done-items');
-      if (fromCat === toCat) {
-        const otherRows = Array.from(sec.querySelectorAll('.item-row')).filter(r => +r.dataset.item !== id);
-        if (otherRows.length && landedInDone !== checked) { scheduleReorderRepaint(repaintAllCategories); return; }
-      }
+      // One sequence per category now (issue #75): ticked and open rows share
+      // the list, so a drop anywhere in the card is meaningful — there is no
+      // done divider left that a drop could "cross the wrong way".
       // A done row dropped into a category whose completed items are hidden
       // would vanish on the repaint below — the drag would read as a delete.
       // Open that category's done section so what was just placed stays put.
-      if (fromCat !== toCat && checked && !catShowDone(toCat)) catDoneOverrides[toCat] = true;
-      // New order = visible DOM order of this section's matching rows.
+      if (fromCat !== toCat && item.checked && !catShowDone(toCat)) catDoneOverrides[toCat] = true;
+      // New order = visible DOM order of this card's rows.
       const ids = Array.from(sec.querySelectorAll('.item-row'))
-        .filter(r => (r.dataset.checked === '1') === checked)
         .map(r => +r.dataset.item);
       item.category_id = toCat;
       ids.forEach((iid, idx) => {
@@ -3709,7 +3707,7 @@
         return false;
       }
       const item = localNewItem(tempId, categoryId, text);
-      current.items.push(item); // smallest sort_order → top of the active list
+      current.items.push(item); // smallest sort_order → top of the category's list
       record({ kind: 'add', itemId: tempId, snapshot: { ...item } });
       cacheList();
       if (wasFullyDone) {
@@ -3723,7 +3721,7 @@
         // Insert just the new row; the form (and its focus) is untouched,
         // so the view stays perfectly still. wireNative picks up the new
         // row (it has no data-wired flag yet) without touching the form.
-        const body = document.querySelector('#cat-' + categoryId + ' .active-items');
+        const body = document.querySelector('#cat-' + categoryId + ' .cat-items');
         if (body) {
           const ph = body.querySelector('.empty-note');
           if (ph) ph.remove();
@@ -3741,12 +3739,11 @@
                      last_checked_by: item.last_checked_by, sort_order: item.sort_order };
       if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
                     path: '/api/items/' + id, body: { checked }, undo })) return;
-      // Mirror the server's move-to-section-bottom so the row lands exactly
-      // where the eventual refetch will put it.
+      // No sort_order change — the server keeps the row where it is too
+      // (issue #75), so the optimistic state matches the next refetch as is.
       item.checked = checked;
       item.completed_at = checked ? new Date().toISOString() : null;
       item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
-      item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
       record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
       // Checking the last open item closes the category (issue #79): a

@@ -108,16 +108,22 @@
       "expectText": "No items yet"
     },
     {
-      "name": "A finished category keeps a lane to drop items into",
+      "name": "A finished category keeps a row to drop items onto",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .active-items button.empty-note.done-note",
+      "expectSelector": ".cat-section .cat-items button.empty-note.done-note",
       "expectText": "All done — add another"
     },
     {
-      "name": "The finished category still shows its completed row beside that lane",
+      "name": "The finished category still shows its completed row in place beside that row",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .done-items .item-row[data-checked=\"1\"]",
+      "expectSelector": ".cat-section .cat-items .item-row[data-checked=\"1\"]",
       "expectText": "Renew the travel insurance"
+    },
+    {
+      "name": "A checked item renders in place between its neighbours (issue #75)",
+      "path": "/?shot=pending",
+      "expectSelector": ".cat-items .item-row[data-checked=\"1\"]",
+      "expectText": "Charge camera batteries"
     },
     {
       "name": "Undo is available in the list header after a change",

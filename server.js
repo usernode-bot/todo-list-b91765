@@ -409,8 +409,9 @@ function invalidImportPayload(categories) {
 
 // Inserts imported categories/items into a list. Category names are matched
 // case-insensitively against existing categories (so repeated names across
-// the markdown's active/completed blocks merge); new items append to the end
-// of the matching checked/unchecked section.
+// the markdown's active/completed blocks merge); new items append in payload
+// order — one position sequence per category, so a checked item keeps the
+// place the markdown gave it instead of moving to a section's end (issue #75).
 async function importCategoriesInto(client, listId, categories, username) {
   const { rows: existing } = await client.query(
     `SELECT id, name FROM categories WHERE list_id = $1`, [listId]);
@@ -438,15 +439,12 @@ async function importCategoriesInto(client, listId, categories, username) {
       catId = r.rows[0].id;
       byName.set(key, catId);
     }
-    const counters = {};
-    for (const checked of [false, true]) {
-      counters[checked] = Number((await client.query(
-        `SELECT COALESCE(MAX(sort_order), 0) AS max FROM items WHERE category_id = $1 AND checked = $2`,
-        [catId, checked])).rows[0].max);
-    }
+    let itemSort = Number((await client.query(
+      `SELECT COALESCE(MAX(sort_order), 0) AS max FROM items WHERE category_id = $1`,
+      [catId])).rows[0].max);
     for (const it of c.items) {
       const checked = !!it.checked;
-      counters[checked]++;
+      itemSort++;
       // completed_at / last_checked_by are computed here rather than via
       // CASE WHEN $n expressions — reusing a parameter in contexts with
       // different deduced types makes Postgres fail with "inconsistent
@@ -454,7 +452,7 @@ async function importCategoriesInto(client, listId, categories, username) {
       await client.query(
         `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [catId, it.text.trim(), checked, counters[checked],
+        [catId, it.text.trim(), checked, itemSort,
          checked ? new Date() : null, username, checked ? username : null]);
     }
   }
@@ -859,7 +857,7 @@ app.post('/api/lists/:id/items', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
        VALUES ($1, $2, FALSE,
-               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
+               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1), 1) - 1,
                $3, $4)
        RETURNING *`,
       [category.id, text, req.user.username, opId]
@@ -883,7 +881,7 @@ app.post('/api/categories/:id/items', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
        VALUES ($1, $2, FALSE,
-               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1 AND NOT checked), 1) - 1,
+               COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1), 1) - 1,
                $3, $4)
        RETURNING *`,
       [category.id, text, req.user.username, opId]
@@ -895,10 +893,11 @@ app.post('/api/categories/:id/items', async (req, res) => {
   }
 });
 
-// Edit text, move to another category, and/or toggle checked. Checking moves
-// the item to the bottom of the checked section of its category; unchecking
-// moves it to the bottom of the unchecked section. A category move drops the
-// item at the end of the matching section of the target category.
+// Edit text, move to another category, and/or toggle checked. Checking no
+// longer moves the row (issue #75): a checked item keeps the sort_order it
+// had, so it stays exactly where it sits in the list — struck through there —
+// and unchecking keeps the position too. A category move drops the item at
+// the end of the target category's list.
 app.patch('/api/items/:id', async (req, res) => {
   try {
     const { item, list, role } = await getItemAccess(req.params.id, req.user);
@@ -923,23 +922,23 @@ app.patch('/api/items/:id', async (req, res) => {
         `UPDATE items SET
            category_id = $1,
            sort_order = COALESCE((SELECT MAX(sort_order) FROM items
-                                   WHERE category_id = $1 AND checked = $2), 0) + 1
-         WHERE id = $3`,
-        [target[0].id, item.checked, item.id]
+                                   WHERE category_id = $1), 0) + 1
+         WHERE id = $2`,
+        [target[0].id, item.id]
       );
       categoryId = target[0].id;
     }
 
+    // sort_order is deliberately left alone here (issue #75): the row keeps
+    // its place in the list when it is ticked or unticked.
     if (typeof req.body.checked === 'boolean' && req.body.checked !== item.checked) {
       await pool.query(
         `UPDATE items SET
            checked = $1,
            completed_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
-           last_checked_by = $4,
-           sort_order = COALESCE((SELECT MAX(sort_order) FROM items
-                                   WHERE category_id = $2 AND checked = $1 AND id <> $3), 0) + 1
-         WHERE id = $3`,
-        [req.body.checked, categoryId, item.id, req.user.username]
+           last_checked_by = $3
+         WHERE id = $2`,
+        [req.body.checked, item.id, req.user.username]
       );
     }
 
@@ -1107,14 +1106,17 @@ async function seedDemoListFor(user) {
       `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Sorted', FALSE, 5) RETURNING id`,
       [list.id]
     )).rows[0];
+    // One position sequence per category (issue #75): the ticked rows sit at
+    // the place they hold in the list — "Charge camera batteries" between the
+    // two open items — so the in-place rendering has data to show.
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
          ($1, 'Plan Saturday hike', FALSE, 1, NULL, $5),
-         ($1, 'Book dinner reservation', FALSE, 2, NULL, $5),
-         ($1, 'Charge camera batteries', TRUE, 1, NOW(), $5),
+         ($1, 'Charge camera batteries', TRUE, 2, NOW(), $5),
+         ($1, 'Book dinner reservation', FALSE, 3, NULL, $5),
          ($2, 'Trail mix', FALSE, 1, NULL, $5),
          ($2, 'Sparkling water', FALSE, 2, NULL, $5),
-         ($2, 'Sunscreen', TRUE, 1, NOW(), $5),
+         ($2, 'Sunscreen', TRUE, 3, NOW(), $5),
          ($3, 'Return the library book', FALSE, 1, NULL, $5),
          ($3, 'Pick up the parcel', FALSE, 2, NULL, $5),
          ($3, 'Top up the travel card', FALSE, 3, NULL, $5),
@@ -1138,7 +1140,7 @@ async function seedDemoListFor(user) {
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by) VALUES
          ($1, 'Pick up dry cleaning', FALSE, 1, NULL, $2, NULL),
-         ($1, 'Take out recycling', TRUE, 1, NOW(), 'staging-demo-user', 'staging-demo-user')`,
+         ($1, 'Take out recycling', TRUE, 2, NOW(), 'staging-demo-user', 'staging-demo-user')`,
       [sharedGeneral.id, user.username]
     );
     await client.query(
