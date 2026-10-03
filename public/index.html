@@ -1422,9 +1422,15 @@
       // Fully-completed categories default to COLLAPSED, so "Show all
       // completed" gives them an explicit override — otherwise tapping it
       // would change nothing on screen.
-      if (v && current) {
+      // "Hide all completed" is the inverse (issue #78): it drops those
+      // keep-open markers again, so every finished category falls back to its
+      // collapsed default. Without this, one "Show all completed" pinned every
+      // finished category open for good, and "Hide" left them all expanded.
+      if (current) {
         for (const c of current.categories) {
-          if (isCatFullyDone(c.id)) setCatCollapsed(c.id, false);
+          if (!isCatFullyDone(c.id)) continue;
+          if (v) setCatCollapsed(c.id, false);
+          else clearKeepOpen(c.id);
         }
       }
       if (current) repaintAllCategories();
@@ -1510,6 +1516,13 @@
       // (isCatFullyDone), so "open" has to be storable to beat it.
       set.add(v ? id : -id);
       persistCollapsed();
+    }
+    // Drops an explicit "keep open" marker, so the category goes back to its
+    // derived default (shut when finished, open otherwise). An explicit
+    // "collapsed" marker is left alone — it already says shut.
+    function clearKeepOpen(catId) {
+      const set = collapsedSet();
+      if (set.delete(-Number(catId))) persistCollapsed();
     }
     function toggleCatCollapsed(catId) {
       // Same guard as toggleCatDone: mid-search the header renders without its
@@ -3724,9 +3737,6 @@
     function toggleItem(id, checked) {
       const item = current.items.find(i => i.id === id);
       if (!item) return;
-      // Capture done-visibility first: checking the last open item flips the
-      // category to fully done, which defaults to collapsed.
-      const wasShowingDone = catShowDone(item.category_id);
       const undo = { checked: item.checked, completed_at: item.completed_at,
                      last_checked_by: item.last_checked_by, sort_order: item.sort_order };
       if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
@@ -3739,11 +3749,14 @@
       item.sort_order = sectionBottom(current.items, item.category_id, checked, id);
       record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
-      // Keep a newly fully-done category expanded only if its done items
-      // were already visible, so the rows the user is looking at don't
-      // vanish mid-interaction. A category the user had collapsed stays
-      // collapsed — checking its last item must not pop it open.
-      if (checked && wasShowingDone && isCatFullyDone(item.category_id)) catDoneOverrides[item.category_id] = true;
+      // Checking the last open item closes the category (issue #79): a
+      // finished category defaults to collapsed, so dropping any "keep open"
+      // marker is all it takes — even one the user set with the chevron or
+      // "Show all completed". The marker is cleared rather than replaced by a
+      // "collapsed" one, so unchecking an item (or undoing this check) puts
+      // the category back to its default, which is open again; tapping the
+      // header still expands a finished category as before.
+      if (checked && isCatFullyDone(item.category_id)) clearKeepOpen(item.category_id);
       repaintCategory(item.category_id);
     }
 
