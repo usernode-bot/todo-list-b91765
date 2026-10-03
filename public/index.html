@@ -1800,7 +1800,12 @@
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      await loadList(lists[0].id);
+      // A list holding BOTH an open and a completed item, so the shot also
+      // shows a completed section with its checked row in place (issue #75).
+      // Home orders newest-first and the newest demo list has nothing ticked,
+      // so plain "first list" can't promise a completed section to check.
+      await loadList(await firstListWhere(lists, d =>
+        d.items.some(i => !i.checked) && d.items.some(i => i.checked)));
       if (!current || !current.items.length) return;
       const target = current.items.find(i => !i.checked) || current.items[0];
       shotPendingIds = new Set([target.id]);

@@ -22,8 +22,11 @@ const INDEX = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html')
 // The source of `function name(...) { ... }`, found by brace matching. None of
 // the functions lifted here hold a brace inside a string or regex.
 function fnSource(name) {
-  const start = INDEX.indexOf(`function ${name}(`);
+  let start = INDEX.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `index.html should define ${name}()`);
+  // Keep a preceding `async` — slicing from `function` alone would drop it
+  // and leave the body's `await`s invalid.
+  if (INDEX.slice(start - 6, start) === 'async ') start -= 6;
   let i = INDEX.indexOf('{', INDEX.indexOf(')', start));
   let depth = 0;
   for (; i < INDEX.length; i++) {
@@ -38,7 +41,7 @@ const LIFTED = [
   'catCollapsed', 'setCatCollapsed', 'clearKeepOpen', 'toggleItem', 'localNewItem',
   'itemOrder', 'sectionItems', 'renderCategory', 'renderItem',
   'esc', 'todayISO', 'nowHM', 'isOverdue', 'displayCategories', 'showCompleted',
-  'catShowDone',
+  'catShowDone', 'firstListWhere', 'loadShotPending',
 ];
 
 function load(items) {
@@ -202,4 +205,38 @@ test('#75: a finished category keeps its drop lane and its completed lane', () =
   assert.deepEqual(laneIds(html, 'active'), [], 'the open lane is empty but present');
   assert.deepEqual(laneIds(html, 'done'), [11], 'the completed row in the completed lane');
   assert.match(html, />1 done</);
+});
+
+// --- the ?shot=pending route ---------------------------------------------------
+// The route must open a list that actually has a completed section to show:
+// Home orders newest-first and the newest demo list has nothing ticked, so the
+// old plain "first list" pick rendered no done lane and the staging check
+// found nothing.
+
+test('the pending shot route picks a list that also shows a completed section', async () => {
+  const s = load([]);
+  s.api = async p => {
+    if (p === '/api/lists') {
+      return { lists: [{ id: 3, name: 'Demo: Due Dates' }, { id: 1, name: 'Demo: Weekend Plans' }] };
+    }
+    if (p === '/api/lists/3') {
+      return { list: { id: 3 }, items: [{ id: 30, category_id: 1, checked: false, sort_order: 1 }] };
+    }
+    return { list: { id: 1 }, items: [
+      { id: 10, category_id: 1, checked: false, sort_order: 1 },
+      { id: 11, category_id: 1, checked: true, sort_order: 2 },
+    ] };
+  };
+  s.loadedId = null;
+  s.loadList = async id => {
+    s.loadedId = id;
+    const d = await s.api('/api/lists/' + id);
+    s.current = { list: d.list, categories: d.categories || [], items: d.items };
+  };
+  s.loadHome = async () => { s.loadedId = 'home'; };
+  s.repaintAllCategories = () => {};
+  await s.loadShotPending();
+  assert.equal(s.loadedId, 1, 'it loads the list with both open and completed rows');
+  assert.ok(s.current.items.some(i => i.checked), 'the opened list has a completed row to render');
+  assert.ok(s.shotPendingIds.has(10), 'the pending marker goes on an open row');
 });
