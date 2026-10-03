@@ -2141,7 +2141,9 @@
       const a = l.activity;
       if (!a || !a.actor) return '';
       const t = a.text.length > 44 ? a.text.slice(0, 43) + '…' : a.text;
-      return `<div class="text-[13px] mt-0.5 truncate tinted">@${esc(a.actor)} ${a.verb === 'added' ? 'added' : 'checked'} “${esc(t)}”</div>`;
+      const verbs = { added: 'added', removed: 'removed' };
+      const verb = verbs[a.verb] || 'checked';
+      return `<div class="text-[13px] mt-0.5 truncate tinted">@${esc(a.actor)} ${verb} “${esc(t)}”</div>`;
     }
 
     // `notice` replaces the list body while keeping the chrome. An offline
