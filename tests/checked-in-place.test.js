@@ -1,6 +1,7 @@
-// Checked items keep their place in the list (issue #75): checking or
-// unchecking an item must not move it — not on the server, and not in the
-// optimistic local state the row is drawn from.
+// Checked items keep their rank within their section (issue #75): checking or
+// unchecking an item must not move it WITHIN its section — not on the server,
+// and not in the optimistic local state the row is drawn from. The two
+// sections (open / completed) still render as separate lists, as before.
 //
 // Like tests/category-collapse.test.js, this lifts the functions out of
 // public/index.html by name and runs them in a vm against a fake list with
@@ -35,7 +36,7 @@ function fnSource(name) {
 const LIFTED = [
   'isCatFullyDone', 'collapsedSet', 'resetCollapsed', 'persistCollapsed',
   'catCollapsed', 'setCatCollapsed', 'clearKeepOpen', 'toggleItem', 'localNewItem',
-  'itemOrder', 'listItems', 'sectionItems', 'renderCategory', 'renderItem',
+  'itemOrder', 'sectionItems', 'renderCategory', 'renderItem',
   'esc', 'todayISO', 'nowHM', 'isOverdue', 'displayCategories', 'showCompleted',
   'catShowDone',
 ];
@@ -101,11 +102,30 @@ test('#75: unchecking an item leaves its sort_order alone too', () => {
   assert.equal(item.completed_at, null);
 });
 
-test('#75: a new item lands on top of the whole category, done rows included', () => {
+test('#75: uncheck then recheck returns the item to its rank in the completed section', () => {
+  // The user's own example: tofu at the TOP of the completed section. Its
+  // sort_order interleaves with the open items' (that is normal now), so the
+  // old append-to-the-end toggle would demote it to last on recheck.
+  const s = load([
+    { id: 1, category_id: 1, checked: false, sort_order: 1, text: 'Milk' },
+    { id: 2, category_id: 1, checked: true, sort_order: 2, text: 'Tofu' },
+    { id: 3, category_id: 1, checked: true, sort_order: 4, text: 'Bread' },
+    { id: 4, category_id: 1, checked: false, sort_order: 3, text: 'Eggs' },
+  ]);
+  const rankOf = () => s.sectionItems(1, true).map(i => i.id);
+  assert.deepEqual(rankOf(), [2, 3], 'tofu starts on top of the completed section');
+  s.toggleItem(2, false);
+  assert.deepEqual(s.sectionItems(1, false).map(i => i.text),
+    ['Milk', 'Tofu', 'Eggs'], 'unchecking files it among the open items by rank');
+  s.toggleItem(2, true);
+  assert.deepEqual(rankOf(), [2, 3], 'rechecking returns tofu to the top, not the end');
+});
+
+test('#75: a new item lands on top of the open section, done rows included', () => {
   const s = load([]);
   // The checked row holds the category's smallest sort_order here — the
-  // normal shape after a few top-of-list adds — and the old
-  // top-of-the-unchecked-section insert ignored it and landed below.
+  // normal shape after a few top-of-list adds and reorders — so a new item
+  // must land ABOVE it to be first in the open section.
   const item = s.localNewItem(99, 1, 'Milk', [
     { id: 1, category_id: 1, checked: true, sort_order: 0 },
     { id: 2, category_id: 1, checked: false, sort_order: 5 },
@@ -117,53 +137,69 @@ test('#75: a new item lands on top of the whole category, done rows included', (
 });
 
 // --- rendering ---------------------------------------------------------------
-// One sequence per category: the done row renders where it sits (struck
-// through), inside the same .cat-items container as the open rows, with the
-// "N done" toggle demoted to the card's footer row.
+// The category renders as two separate sections again: an open-items lane and
+// (behind the "N done" toggle) a completed-items lane, each in its own order.
 
 function itemIds(html) {
   return [...html.matchAll(/data-item="(\d+)"/g)].map(m => +m[1]);
 }
 
-test('#75: a checked row renders in place, struck through, in the shared sequence', () => {
+// One category is rendered per call, and the lanes appear in a fixed order:
+// active lane, "N done" toggle, done lane. Slice between those markers.
+function laneIds(html, lane) {
+  const marker = lane === 'active' ? 'class="active-items' : 'class="done-items"';
+  const start = html.indexOf(marker);
+  if (start === -1) return null;
+  const toggle = html.indexOf('toggleCatDone(1)');
+  const sectionEnd = html.indexOf('</section>');
+  const end = lane === 'active'
+    ? (toggle !== -1 ? toggle : sectionEnd)
+    : sectionEnd;
+  return itemIds(html.slice(start, end));
+}
+
+test('#75: a checked row renders in its own completed lane, struck through', () => {
   const s = load([
     { id: 10, category_id: 1, checked: false, sort_order: 1, text: 'First' },
     { id: 11, category_id: 1, checked: true, sort_order: 2, text: 'Middle', completed_at: '2026-01-01' },
     { id: 12, category_id: 1, checked: false, sort_order: 3, text: 'Last' },
   ]);
   const html = s.renderCategory({ id: 1, name: 'General' });
-  assert.ok(html.includes('class="cat-items"'), 'the category body renders');
-  assert.ok(!html.includes('done-items'), 'the separate done lane is gone');
-  // Done row sits between its neighbours, in one sequence.
-  assert.deepEqual(itemIds(html), [10, 11, 12]);
-  const row = html.slice(html.indexOf('data-item="11"'), html.indexOf('data-item="12"'));
+  assert.ok(html.includes('class="active-items'), 'the open lane renders');
+  assert.deepEqual(laneIds(html, 'active'), [10, 12], 'only open rows in the open lane');
+  assert.deepEqual(laneIds(html, 'done'), [11], 'the completed row in the completed lane');
+  const row = html.slice(html.indexOf('data-item="11"'), html.indexOf('</section>'));
   assert.ok(row.includes('data-checked="1"'), 'marked done');
   assert.ok(row.includes('line-through'), 'struck through');
-  // The done-toggle is now the card's footer row, after the items.
-  assert.ok(html.indexOf('toggleCatDone(1)') > html.indexOf('data-item="11"'),
-    'the done-toggle renders after the in-place done row');
+  // The "N done" toggle sits between the two lanes.
+  assert.ok(html.indexOf('toggleCatDone(1)') > html.indexOf('data-item="12"'),
+    'the toggle renders after the open lane');
+  assert.ok(html.indexOf('toggleCatDone(1)') < html.indexOf('class="done-items"'),
+    'and before the completed lane');
   assert.match(html, />1 done</);
 });
 
-test("#75: a category's hidden completed rows leave the footer toggle in place", () => {
+test("#75: a category's hidden completed rows leave the toggle in place", () => {
   const s = load([
     { id: 10, category_id: 1, checked: false, sort_order: 1, text: 'First' },
     { id: 11, category_id: 1, checked: true, sort_order: 2, text: 'Middle', completed_at: '2026-01-01' },
     { id: 12, category_id: 1, checked: false, sort_order: 3, text: 'Last' },
   ]);
-  s.catDoneOverrides[1] = false; // what the footer toggle's Hide does
+  s.catDoneOverrides[1] = false; // what the "N done" toggle's Hide does
   const html = s.renderCategory({ id: 1, name: 'General' });
-  assert.deepEqual(itemIds(html), [10, 12], 'the done row is hidden');
-  assert.match(html, /toggleCatDone\(1\)/, 'but the footer toggle stays');
+  assert.deepEqual(laneIds(html, 'active'), [10, 12]);
+  assert.equal(laneIds(html, 'done'), null, 'the completed lane is not rendered');
+  assert.match(html, /toggleCatDone\(1\)/, 'but the toggle stays');
 });
 
-test('#75: a finished category keeps its drop row and its done row in one sequence', () => {
+test('#75: a finished category keeps its drop lane and its completed lane', () => {
   const s = load([
     { id: 11, category_id: 1, checked: true, sort_order: 1, text: 'Only', completed_at: '2026-01-01' },
   ]);
   s.setCatCollapsed(1, false); // what loadShotDrop and the chevron do
   const html = s.renderCategory({ id: 1, name: 'General' });
-  assert.match(html, /empty-note done-note/, 'the drop row stays');
-  assert.deepEqual(itemIds(html), [11], 'the done row renders beside it');
+  assert.match(html, /empty-note done-note/, 'the drop row stays in the open lane');
+  assert.deepEqual(laneIds(html, 'active'), [], 'the open lane is empty but present');
+  assert.deepEqual(laneIds(html, 'done'), [11], 'the completed row in the completed lane');
   assert.match(html, />1 done</);
 });

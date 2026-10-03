@@ -410,8 +410,9 @@ function invalidImportPayload(categories) {
 // Inserts imported categories/items into a list. Category names are matched
 // case-insensitively against existing categories (so repeated names across
 // the markdown's active/completed blocks merge); new items append in payload
-// order — one position sequence per category, so a checked item keeps the
-// place the markdown gave it instead of moving to a section's end (issue #75).
+// order, so each item keeps the rank its section gave it — a checked item
+// stays where the markdown put it in the completed section rather than
+// sinking to its end (issue #75).
 async function importCategoriesInto(client, listId, categories, username) {
   const { rows: existing } = await client.query(
     `SELECT id, name FROM categories WHERE list_id = $1`, [listId]);
@@ -894,9 +895,10 @@ app.post('/api/categories/:id/items', async (req, res) => {
 });
 
 // Edit text, move to another category, and/or toggle checked. Checking no
-// longer moves the row (issue #75): a checked item keeps the sort_order it
-// had, so it stays exactly where it sits in the list — struck through there —
-// and unchecking keeps the position too. A category move drops the item at
+// longer moves the row (issue #75): the sort_order is kept, so an item's rank
+// WITHIN its section survives a check/uncheck round trip — tofu at the top of
+// the completed section comes back to the top when it is re-ticked, instead
+// of being appended to that section's end. A category move drops the item at
 // the end of the target category's list.
 app.patch('/api/items/:id', async (req, res) => {
   try {
@@ -930,7 +932,7 @@ app.patch('/api/items/:id', async (req, res) => {
     }
 
     // sort_order is deliberately left alone here (issue #75): the row keeps
-    // its place in the list when it is ticked or unticked.
+    // its rank within its section when it is ticked or unticked.
     if (typeof req.body.checked === 'boolean' && req.body.checked !== item.checked) {
       await pool.query(
         `UPDATE items SET
@@ -1106,9 +1108,11 @@ async function seedDemoListFor(user) {
       `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'Sorted', FALSE, 5) RETURNING id`,
       [list.id]
     )).rows[0];
-    // One position sequence per category (issue #75): the ticked rows sit at
-    // the place they hold in the list — "Charge camera batteries" between the
-    // two open items — so the in-place rendering has data to show.
+    // Sections keep their own order, and a toggle never renumbers it
+    // (issue #75): the ticked rows hold ranks inside their completed sections
+    // that survive a check/uncheck round trip. Interleaved sort_orders across
+    // the two sections are normal and harmless — each section sorts on its
+    // own.
     await client.query(
       `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by) VALUES
          ($1, 'Plan Saturday hike', FALSE, 1, NULL, $5),

@@ -108,21 +108,21 @@
       "expectText": "No items yet"
     },
     {
-      "name": "A finished category keeps a row to drop items onto",
+      "name": "A finished category keeps a lane to drop items into",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .cat-items button.empty-note.done-note",
+      "expectSelector": ".cat-section .active-items button.empty-note.done-note",
       "expectText": "All done — add another"
     },
     {
-      "name": "The finished category still shows its completed row in place beside that row",
+      "name": "The finished category still shows its completed section beside that lane",
       "path": "/?shot=drop",
-      "expectSelector": ".cat-section .cat-items .item-row[data-checked=\"1\"]",
+      "expectSelector": ".cat-section .done-items .item-row[data-checked=\"1\"]",
       "expectText": "Renew the travel insurance"
     },
     {
-      "name": "A checked item renders in place between its neighbours (issue #75)",
+      "name": "A checked item renders in its own completed section (issue #75)",
       "path": "/?shot=pending",
-      "expectSelector": ".cat-items .item-row[data-checked=\"1\"]",
+      "expectSelector": ".done-items .item-row[data-checked=\"1\"]",
       "expectText": "Charge camera batteries"
     },
     {
