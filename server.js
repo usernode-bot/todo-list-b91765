@@ -1218,8 +1218,23 @@ async function seedDemoListFor(user) {
       `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING id`,
       ['Demo: Shared Remnants', user.id, user.username]
     )).rows[0];
+    const removalGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [removal.id]
+    )).rows[0];
+    // The list keeps items on it, created by the tester themself so their
+    // "added" hints stay the viewer's own and never compete with the removal
+    // in the activity line. It is also the newest list, which the ?shot=pending
+    // and ?shot=undo states open first — an empty one would strand both, with
+    // no row to stage the pending marker or undo entry on.
     await client.query(
-      `INSERT INTO item_events (list_id, actor, text) VALUES ($1, 'staging-demo-user', ' borrowed the good marker')`,
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by) VALUES
+         ($1, 'Borrow the good marker', FALSE, 1, $2),
+         ($1, 'Restock the whiteboard pens', FALSE, 2, $2)`,
+      [removalGeneral.id, user.username]
+    );
+    await client.query(
+      `INSERT INTO item_events (list_id, actor, text) VALUES ($1, 'staging-demo-user', 'the good marker')`,
       [removal.id]
     );
     await client.query(
