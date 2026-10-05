@@ -260,6 +260,12 @@ app.get('/api/lists', async (req, res) => {
                     WHERE c.list_id = l.id AND i.created_by IS NOT NULL
                       AND LOWER(i.created_by) <> LOWER($2)
                       AND i.created_at > NOW() - INTERVAL '7 days'
+                   UNION ALL
+                   SELECT e.actor AS actor, 'removed' AS verb, e.text AS text, e.removed_at AS at
+                     FROM item_events e
+                    WHERE e.list_id = l.id
+                      AND LOWER(e.actor) <> LOWER($2)
+                      AND e.removed_at > NOW() - INTERVAL '7 days'
                  ) x ORDER BY x.at DESC LIMIT 1
                ) ev) AS activity
          FROM lists l
@@ -742,7 +748,27 @@ app.delete('/api/categories/:id', async (req, res) => {
     if (rows[0].n <= 1) {
       return res.status(400).json({ error: "Can't delete the only category — lists need at least one" });
     }
-    await pool.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
+    // Deleting the category cascades to its items, so each item's removal is
+    // recorded first — atomically, in the same transaction as the delete, so
+    // a failure cannot leave events for items that still exist.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: itemTexts } = await client.query(
+        `SELECT text FROM items WHERE category_id = $1`, [category.id]);
+      for (const row of itemTexts) {
+        await client.query(
+          `INSERT INTO item_events (list_id, actor, text) VALUES ($1, $2, $3)`,
+          [category.list_id, req.user.username, row.text]);
+      }
+      await client.query(`DELETE FROM categories WHERE id = $1`, [category.id]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
     notify(category.list_id, req);
     res.json({ ok: true });
   } catch (err) {
@@ -982,7 +1008,23 @@ app.delete('/api/items/:id', async (req, res) => {
   try {
     const { item, list, role } = await getItemAccess(req.params.id, req.user);
     if (!item || !role) return res.status(404).json({ error: 'Item not found' });
-    await pool.query(`DELETE FROM items WHERE id = $1`, [item.id]);
+    // The activity line says who removed what, so record the event (with the
+    // item's text, which outlives the row) in the same transaction as the
+    // delete — one can't land without the other.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO item_events (list_id, actor, text) VALUES ($1, $2, $3)`,
+        [list.id, req.user.username, item.text]);
+      await client.query(`DELETE FROM items WHERE id = $1`, [item.id]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
     notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
@@ -1172,6 +1214,39 @@ async function seedDemoListFor(user) {
          ($1, 'Someday: learn to sail', FALSE, 5, NULL, $2, NULL, NULL)`,
       [datedGeneral.id, user.username]
     );
+    // A second shared list carrying only a removal event, so the Home
+    // screen can show the 'removed' hint ("@staging-demo-user removed …")
+    // without displacing the 'checked' hint on the first shared list —
+    // each list's activity line shows only its single most recent event.
+    // Seeding an event, not a signal: nothing reads whether a user has
+    // ever removed an item.
+    const removal = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING id`,
+      ['Demo: Shared Remnants', user.id, user.username]
+    )).rows[0];
+    const removalGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [removal.id]
+    )).rows[0];
+    // The list keeps items on it, created by the tester themself so their
+    // "added" hints stay the viewer's own and never compete with the removal
+    // in the activity line. It is also the newest list, which the ?shot=pending
+    // and ?shot=undo states open first — an empty one would strand both, with
+    // no row to stage the pending marker or undo entry on.
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by) VALUES
+         ($1, 'Borrow the good marker', FALSE, 1, $2),
+         ($1, 'Restock the whiteboard pens', FALSE, 2, $2)`,
+      [removalGeneral.id, user.username]
+    );
+    await client.query(
+      `INSERT INTO item_events (list_id, actor, text) VALUES ($1, 'staging-demo-user', 'the good marker')`,
+      [removal.id]
+    );
+    await client.query(
+      `INSERT INTO list_members (list_id, username) VALUES ($1, 'staging-demo-user')`,
+      [removal.id]
+    );
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1248,6 +1323,19 @@ async function start() {
     CREATE INDEX IF NOT EXISTS items_due_idx ON items (due_date) WHERE due_date IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS items_client_op_id_key
       ON items (client_op_id) WHERE client_op_id IS NOT NULL;
+
+    -- Append-only record of item removals: survives the deleted item row so
+    -- the shared-list activity line can still say who removed what. There is
+    -- deliberately no FK to items; deleting a list cascades its events away.
+    CREATE TABLE IF NOT EXISTS item_events (
+      id SERIAL PRIMARY KEY,
+      list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+      actor VARCHAR(255) NOT NULL,
+      text TEXT NOT NULL,
+      removed_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    COMMENT ON TABLE item_events IS 'staging:private';
+    CREATE INDEX IF NOT EXISTS item_events_list_idx ON item_events (list_id);
 
     -- The app used to keep its own roster of everyone it had authenticated
     -- and validate invites against it, which rejected every real Usernode
