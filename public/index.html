@@ -2073,6 +2073,7 @@
       try {
         ({ lists } = await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS }));
         lists = await maybeImportLandingList(lists);
+        lists = await seedExampleLists(lists);
         // Was `cacheSet`, whose false return nobody read — so a refused write
         // left the app believing it had a saved copy it did not have. Evicting
         // and retrying is what the queue already does for the same reason.
@@ -2122,6 +2123,46 @@
         rawRemove('todo:landing-list');
         return (await api('/api/lists')).lists;
       } catch (_) { return lists; } // keep the key; retried on a later load
+    }
+
+    // Example lists for a brand-new account: a home with zero lists is a blank
+    // screen, so the first successful connected load creates two everyday
+    // lists through the same API calls newList() and quick-add use. Offered
+    // once — the flag is written BEFORE the first POST, so a seed that dies
+    // halfway is never restarted (a restart would duplicate the first list) —
+    // and if the user deletes the examples, they stay deleted.
+    async function seedExampleLists(lists) {
+      if (lists.length || rawGet(NS + 'example-lists-seeded')) return lists;
+      rawSet(NS + 'example-lists-seeded', '1');
+      // Weekend chores first: Home orders newest-first, so Groceries — the
+      // list a new user is more likely to reach for — ends up on top.
+      const examples = [
+        ['Weekend chores', ['Clean kitchen', 'Laundry', 'Water plants'], 'Water plants'],
+        ['Groceries', ['Milk', 'Eggs', 'Bread', 'Coffee'], 'Bread'],
+      ];
+      try {
+        for (const example of examples) {
+          const { list } = await api('/api/lists', {
+            method: 'POST', body: JSON.stringify({ name: example[0] }), timeoutMs: LOAD_TIMEOUT_MS,
+          });
+          // Quick-add inserts at the TOP of the section, so the items are
+          // added in reverse for the finished list to read top-down.
+          for (const text of example[1].slice().reverse()) {
+            const { item } = await api('/api/lists/' + list.id + '/items', {
+              method: 'POST', body: JSON.stringify({ text }), timeoutMs: LOAD_TIMEOUT_MS,
+            });
+            if (text === example[2]) {
+              // Same endpoint toggleItem() uses, so completed_at and
+              // last_checked_by are set exactly as for a user's tick.
+              await api('/api/items/' + item.id, {
+                method: 'PATCH', body: JSON.stringify({ checked: true }), timeoutMs: LOAD_TIMEOUT_MS,
+              });
+            }
+          }
+        }
+        // Refetch so Home paints real open/done counts, not empty ones.
+        return (await api('/api/lists', { timeoutMs: LOAD_TIMEOUT_MS })).lists;
+      } catch (_) { return lists; } // no retry: Home falls back to "No lists yet."
     }
 
     function homeBadge(l) {
