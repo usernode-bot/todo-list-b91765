@@ -239,6 +239,10 @@ app.get('/api/lists/:id/events', async (req, res) => {
 app.get('/api/lists', async (req, res) => {
   try {
     if (IS_STAGING) await seedDemoListFor(req.user);
+    // First-run examples for a genuinely empty user (production, not gated on
+    // staging — staging's demo seed above has already created lists there, so
+    // the guard inside no-ops).
+    await seedExampleListsFor(req.user);
     const { rows } = await pool.query(
       `SELECT l.id, l.name, l.owner_id, l.owner_username, l.created_at, l.due_dates_enabled,
               (l.owner_id = $1) AS is_owner,
@@ -1251,6 +1255,70 @@ async function seedDemoListFor(user) {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Staging demo seed failed:', err.message);
+  } finally {
+    client.release();
+  }
+}
+
+// First-run examples: when someone opens Todo List for the very first time and
+// owns or belongs to no list, Home would otherwise be an empty screen. Two
+// everyday example lists are seeded instead — real lists, tickable, editable
+// and deletable like any other. The no-lists guard is the same one the staging
+// seed uses, so the examples are offered exactly once: a user who deletes them
+// never gets them back.
+async function seedExampleListsFor(user) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM lists
+      WHERE owner_id = $1
+         OR EXISTS (SELECT 1 FROM list_members m WHERE m.list_id = lists.id
+                      AND (m.user_id = $1 OR LOWER(m.username) = LOWER($2)))
+      LIMIT 1`,
+    [user.id, user.username]
+  );
+  if (rows.length) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const groceries = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING id`,
+      ['Groceries', user.id, user.username]
+    )).rows[0];
+    const groceriesGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [groceries.id]
+    )).rows[0];
+    // Checked rows keep their inserted sort_order (issue #88): the list reads
+    // Milk, Eggs, ~~Bread~~, Coffee top to bottom, as if ticked in place. The
+    // tick is attributed to the user themself, so no "@someone checked …"
+    // activity line shows on Home for the examples.
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by) VALUES
+         ($1, 'Milk', FALSE, 1, NULL, $2, NULL),
+         ($1, 'Eggs', FALSE, 2, NULL, $2, NULL),
+         ($1, 'Bread', TRUE, 3, NOW(), $2, $2),
+         ($1, 'Coffee', FALSE, 4, NULL, $2, NULL)`,
+      [groceriesGeneral.id, user.username]
+    );
+    const chores = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username) VALUES ($1, $2, $3) RETURNING id`,
+      ['Weekend chores', user.id, user.username]
+    )).rows[0];
+    const choresGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [chores.id]
+    )).rows[0];
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, last_checked_by) VALUES
+         ($1, 'Clean kitchen', FALSE, 1, NULL, $2, NULL),
+         ($1, 'Laundry', FALSE, 2, NULL, $2, NULL),
+         ($1, 'Water plants', TRUE, 3, NOW(), $2, $2)`,
+      [choresGeneral.id, user.username]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Example list seed failed:', err.message);
   } finally {
     client.release();
   }
