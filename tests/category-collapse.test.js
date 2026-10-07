@@ -35,7 +35,7 @@ function fnSource(name) {
 const LIFTED = [
   'showCompleted', 'setShowCompleted', 'isCatFullyDone', 'catShowDone',
   'collapsedSet', 'resetCollapsed', 'persistCollapsed', 'catCollapsed',
-  'setCatCollapsed', 'clearKeepOpen', 'toggleItem',
+  'setCatCollapsed', 'clearKeepOpen', 'toggleItem', 'toggleCatCollapsed',
 ];
 
 // A list with an unfinished category (1) and a finished one (2).
@@ -65,6 +65,11 @@ function load() {
     commit: () => true,
     record() {}, cacheList() {}, repaintCategory() {}, repaintAllCategories() {},
     sectionBottom: () => 99,
+    // Stubs toggleCatCollapsed needs: no search active, and the instant
+    // reduced-motion branch (there is no layout to animate in a vm).
+    searchActive: () => false,
+    prefersReducedMotion: () => true,
+    document: { getElementById: () => null },
   };
   vm.createContext(sandbox);
   // `let collapsedIds` / `const catDoneOverrides` in the page are top-level
@@ -178,6 +183,34 @@ test('#79: a finished category can still be expanded by hand afterwards', () => 
   s.toggleItem(10, true);
   s.setCatCollapsed(1, false); // what toggleCatCollapsed does on a header tap
   assert.equal(s.catCollapsed(1), false);
+});
+
+test('#91: opening a category opens done items hidden by the global switch', () => {
+  const s = load();
+  s.store.set('todo:showCompleted', 'false');
+  assert.equal(s.catCollapsed(2), true, 'the finished category starts collapsed');
+  assert.equal(s.catShowDone(2), false, 'its done items start hidden');
+  s.toggleCatCollapsed(2);
+  assert.equal(s.catCollapsed(2), false);
+  assert.equal(s.catShowDone(2), true);
+});
+
+test('#91: opening re-opens done items the "N done" row closed by hand', () => {
+  const s = load();
+  s.catDoneOverrides[2] = false;
+  s.toggleCatCollapsed(2);
+  assert.equal(s.catShowDone(2), true);
+});
+
+test('#91: closing a category leaves done visibility alone', () => {
+  const s = load();
+  s.store.set('todo:showCompleted', 'false');
+  s.toggleCatCollapsed(2);
+  s.toggleCatCollapsed(2); // close again
+  assert.equal(s.catCollapsed(2), true);
+  assert.equal(s.catShowDone(2), true, 'closing must not re-hide the done rows');
+  s.toggleCatCollapsed(2); // reopen
+  assert.equal(s.catShowDone(2), true);
 });
 
 test('the collapse state is persisted per list', () => {

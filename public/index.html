@@ -1530,6 +1530,9 @@
       // transition do.
       if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function') {
         setCatCollapsed(catId, !opening);
+        // Opening also opens the done rows when they would render closed,
+        // exactly as the add button does (issue #91).
+        if (opening && !catShowDone(catId)) catDoneOverrides[catId] = true;
         repaintCategory(catId);
         return;
       }
@@ -1539,6 +1542,8 @@
         // collapsed) swap to the expanded header the instant the tap lands,
         // same as the chevron rotation starts immediately.
         setCatCollapsed(catId, false);
+        // Same done-rows opening as the reduced-motion path (issue #91).
+        if (opening && !catShowDone(catId)) catDoneOverrides[catId] = true;
         repaintCategory(catId);
         // repaintCategory swapped the section node (outerHTML), so measure
         // the freshly rendered one, not the detached collapsed section.
