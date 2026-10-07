@@ -3760,14 +3760,16 @@
       item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
       record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
       cacheList();
-      // Checking the last open item closes the category (issue #79): a
-      // finished category defaults to collapsed, so dropping any "keep open"
-      // marker is all it takes — even one the user set with the chevron or
-      // "Show all completed". The marker is cleared rather than replaced by a
-      // "collapsed" one, so unchecking an item (or undoing this check) puts
-      // the category back to its default, which is open again; tapping the
-      // header still expands a finished category as before.
-      if (checked && isCatFullyDone(item.category_id)) clearKeepOpen(item.category_id);
+      // Issue #93: only close the category when its done list is already
+      // hidden. With the completed rows showing, record an explicit keep-open
+      // marker (setCatCollapsed) so the card does not fall back to the
+      // finished-means-shut default; unchecking later still lands on the open
+      // default. Hidden done list keeps the old behaviour (issue #79): drop
+      // any keep-open marker so the finished default (collapsed) applies.
+      if (checked && isCatFullyDone(item.category_id)) {
+        if (catShowDone(item.category_id)) setCatCollapsed(item.category_id, false);
+        else clearKeepOpen(item.category_id);
+      }
       repaintCategory(item.category_id);
     }
 

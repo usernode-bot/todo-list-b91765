@@ -102,16 +102,46 @@ test('#78: Hide all completed leaves an unfinished category the user collapsed s
   assert.equal(s.catCollapsed(1), true);
 });
 
-test('#79: checking the last open item collapses the category', () => {
+// Issue #93: the last check only closes the category when its done list is
+// already hidden — with the completed rows showing, the card stays open.
+
+test('#93: checking the last open item stays open while the done list is shown', () => {
   const s = load();
   assert.equal(s.catCollapsed(1), false);
+  s.toggleItem(10, true);
+  assert.equal(s.catCollapsed(1), false, 'done list shown (the default): card stays open');
+  // The keep-open marker is written and persisted, so a reload keeps the card open.
+  assert.deepEqual([...s.store.get('todo:collapsed:7')], [-1]);
+  s.resetCollapsed();
+  assert.equal(s.catCollapsed(1), false);
+});
+
+test('#93: checking the last open item collapses when the done list is hidden', () => {
+  const s = load();
+  s.rawSet('todo:showCompleted', 'false'); // global show-completed off
+  assert.equal(s.catShowDone(1), false);
   s.toggleItem(10, true);
   assert.equal(s.catCollapsed(1), true);
 });
 
-test('#79: it collapses even a category explicitly kept open', () => {
+test('#93: the per-category "N done" divider counts as the done list too', () => {
+  const s = load();
+  s.catDoneOverrides[1] = false; // divider folded for this category only
+  s.toggleItem(10, true);
+  assert.equal(s.catCollapsed(1), true);
+});
+
+test('#93: an explicit keep-open marker survives the last tick while done is shown', () => {
   const s = load();
   s.setShowCompleted(true);
+  s.setCatCollapsed(1, false); // what toggleCatCollapsed does on a header tap
+  s.toggleItem(10, true);
+  assert.equal(s.catCollapsed(1), false);
+});
+
+test('#93: an explicit keep-open marker is still dropped when the done list is hidden', () => {
+  const s = load();
+  s.catDoneOverrides[1] = false;
   s.setCatCollapsed(1, false);
   s.toggleItem(10, true);
   assert.equal(s.catCollapsed(1), true);
@@ -122,17 +152,29 @@ test('#79: checking an item that leaves others open does not collapse', () => {
   s.current.items.push({ id: 12, category_id: 1, checked: false });
   s.toggleItem(10, true);
   assert.equal(s.catCollapsed(1), false);
+  // No marker either way: the state is untouched.
+  assert.equal(s.store.get('todo:collapsed:7'), undefined);
 });
 
 test('#79: unchecking (or undoing) returns the category to its open default', () => {
+  // Done list shown: the tick wrote a keep-open marker, unchecking lands the
+  // category on its open default anyway.
   const s = load();
   s.toggleItem(10, true);
   s.toggleItem(10, false);
   assert.equal(s.catCollapsed(1), false);
+  // Done list hidden: the tick collapsed the card, unchecking reopens it.
+  const t = load();
+  t.catDoneOverrides[1] = false;
+  t.toggleItem(10, true);
+  assert.equal(t.catCollapsed(1), true);
+  t.toggleItem(10, false);
+  assert.equal(t.catCollapsed(1), false);
 });
 
 test('#79: a finished category can still be expanded by hand afterwards', () => {
   const s = load();
+  s.catDoneOverrides[1] = false; // tick collapses when the done list is hidden
   s.toggleItem(10, true);
   s.setCatCollapsed(1, false); // what toggleCatCollapsed does on a header tap
   assert.equal(s.catCollapsed(1), false);
