@@ -2038,11 +2038,25 @@
     // on (chips, "Today", the overdue row) and `/?shot=dueeditor` opens the
     // editor on top of it. Both are display-only: the switch is flipped in the
     // local copy when no dated list exists, and neither one PATCHes anything.
+    // Since issue #97 dates are on for every list, so "the list with the flag
+    // set" no longer singles out the one carrying dated items — the newest
+    // list usually wins and it is dateless, which would show "+ date" buttons
+    // and no chips. So the candidates are probed first (reads only, like every
+    // shot link) and the first list that actually holds a dated item opens.
     async function loadShotDue() {
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
       if (!lists.length) return loadHome();
-      const target = lists.find(l => l.due_dates_enabled) || lists[0];
+      let datedId = null;
+      for (const l of lists) {
+        if (!l.due_dates_enabled) continue;
+        try {
+          const data = await api('/api/lists/' + l.id);
+          if (data.items.some(i => i.due_date)) { datedId = l.id; break; }
+        } catch (_) { /* unreadable list: try the next candidate */ }
+      }
+      const target = lists.find(l => String(l.id) === String(datedId))
+        || lists.find(l => l.due_dates_enabled) || lists[0];
       await loadList(target.id);
       if (!current) return;
       if (!datesOn()) { current.list.due_dates_enabled = true; renderList(current); }
