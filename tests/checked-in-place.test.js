@@ -65,6 +65,8 @@ function load(items) {
     cacheSet: (k, v) => store.set(k, v),
     commit: () => true,
     record() {}, cacheList() {}, repaintCategory() {},
+    // Models a dateless list whose owner turned due dates off — not the
+    // default, which is on since issue #97.
     datesOn: () => false,
     searchActive: () => false,
     searchQ: () => '',

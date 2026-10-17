@@ -1337,9 +1337,12 @@ async function start() {
       owner_username VARCHAR(255) NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
-    -- Per-list opt-in for due dates. Defaults FALSE so every existing list —
-    -- and every new one — stays exactly as dateless as it was before.
+    -- Per-list due dates (issue #38), on by default (issue #97): new lists
+    -- get the TRUE default below, existing lists were switched on once by the
+    -- backfill further down, and an owner can still turn dates off per list —
+    -- an explicit off then sticks, because the backfill never runs again.
     ALTER TABLE lists ADD COLUMN IF NOT EXISTS due_dates_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE lists ALTER COLUMN due_dates_enabled SET DEFAULT TRUE;
     COMMENT ON TABLE lists IS 'staging:private';
 
     CREATE TABLE IF NOT EXISTS list_members (
@@ -1404,6 +1407,27 @@ async function start() {
     );
     COMMENT ON TABLE item_events IS 'staging:private';
     CREATE INDEX IF NOT EXISTS item_events_list_idx ON item_events (list_id);
+
+    -- One-time migration markers, so a data backfill runs on exactly one boot.
+    CREATE TABLE IF NOT EXISTS app_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    COMMENT ON TABLE app_migrations IS 'staging:private';
+    -- Issue #97: switch existing lists on exactly once. A list that still
+    -- holds dated items but has dates off was switched off by its owner, so
+    -- it is left alone; after this runs, any later "off" sticks across
+    -- reboots because the marker row makes the UPDATE a no-op.
+    WITH first_run AS (
+      INSERT INTO app_migrations (name) VALUES ('due_dates_default_on')
+      ON CONFLICT (name) DO NOTHING RETURNING name
+    )
+    UPDATE lists l SET due_dates_enabled = TRUE
+     WHERE NOT l.due_dates_enabled
+       AND EXISTS (SELECT 1 FROM first_run)
+       AND NOT EXISTS (
+         SELECT 1 FROM items i JOIN categories c ON i.category_id = c.id
+          WHERE c.list_id = l.id AND i.due_date IS NOT NULL);
 
     -- The app used to keep its own roster of everyone it had authenticated
     -- and validate invites against it, which rejected every real Usernode
