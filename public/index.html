@@ -1515,8 +1515,82 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const wasCollapsed = catCollapsed(catId);
+      setCatCollapsed(catId, !wasCollapsed);
+      animateCatToggle(catId, !wasCollapsed);
+    }
+
+    // The card body slides open and closed (issue #72) instead of snapping, so
+    // the header and the body read as one motion. The state was already
+    // persisted by setCatCollapsed above; this is purely the render step. Every
+    // collapse that is NOT a tap on the header — the adder's auto-expand, the
+    // global show-completed loop, the ?shot loaders, full repaints — still
+    // calls setCatCollapsed with a plain repaintCategory and stays instant.
+    const CAT_TOGGLE_MS = 180;
+    const CAT_TOGGLE_EASE = 'ease'; // mirrors .cat-head .chev's transition
+    const catToggleAnims = new Map(); // cat id -> in-flight WAAPI Animation
+
+    function animateCatToggle(catId, closing) {
+      // Guards first: reduced-motion or WAAPI-less browsers keep today's snap
+      // — the same pattern as the reorder FLIP pass.
+      const reduced = prefersReducedMotion() || typeof Element.prototype.animate !== 'function';
+      // A second tap mid-slide starts the opposite slide from wherever the
+      // card now is; the repaint below discards the ghost node anyway.
+      const prev = catToggleAnims.get(Number(catId));
+      if (prev) { try { prev.cancel(); } catch (_) {} catToggleAnims.delete(Number(catId)); }
+      if (reduced) { repaintCategory(catId); return; }
+      if (closing) {
+        // Measure the live body BEFORE the repaint, then slide it shut.
+        const oldSec = document.getElementById('cat-' + catId);
+        const body = oldSec && oldSec.querySelector('.un-group');
+        const height = body ? body.getBoundingClientRect().height : 0;
+        // A zero-height body has nothing worth animating: today's snap.
+        if (!body || !height) { repaintCategory(catId); return; }
+        // repaintCategory's outerHTML swap detaches the old body; slide it
+        // shut under the new collapsed header and take it away. It is already
+        // at 0 when removed, so the cards below end exactly where the repaint
+        // put them.
+        body.style.height = height + 'px';
+        body.style.overflow = 'hidden';
+        body.style.pointerEvents = 'none';
+        body.setAttribute('aria-hidden', 'true');
+        // An unrelated repaint's wireNative() pass inside this window must not
+        // attach swipe or drag handlers to nodes about to be deleted.
+        body.querySelectorAll('.item-row, .un-group-row').forEach(r => r.setAttribute('data-wired', ''));
+        repaintCategory(catId); // header shows the collapsed state immediately
+        const sec = document.getElementById('cat-' + catId);
+        if (!sec) return;
+        sec.appendChild(body);
+        const anim = body.animate(
+          [{ height: height + 'px' }, { height: '0px' }],
+          { duration: CAT_TOGGLE_MS, easing: CAT_TOGGLE_EASE }
+        );
+        catToggleAnims.set(Number(catId), anim);
+        anim.onfinish = () => {
+          catToggleAnims.delete(Number(catId));
+          if (body.isConnected) body.remove();
+        };
+        anim.oncancel = () => catToggleAnims.delete(Number(catId));
+      } else {
+        // Repaint first so the header (chevron, + button) shows the expanded
+        // state immediately, then measure the fresh body's natural height and
+        // slide it open.
+        repaintCategory(catId);
+        const sec = document.getElementById('cat-' + catId);
+        const newBody = sec && sec.querySelector('.un-group');
+        const target = newBody ? newBody.getBoundingClientRect().height : 0;
+        // Nothing to show (or no section any more): ordinary layout is
+        // already correct, nothing to animate.
+        if (!newBody || !target) return;
+        const anim = newBody.animate(
+          [{ height: '0px', overflow: 'hidden' }, { height: target + 'px', overflow: 'hidden' }],
+          { duration: CAT_TOGGLE_MS, easing: CAT_TOGGLE_EASE }
+        );
+        catToggleAnims.set(Number(catId), anim);
+        // At animation end the browser releases it and the body's ordinary
+        // layout takes over, so no cleanup styles are needed.
+        anim.onfinish = anim.oncancel = () => catToggleAnims.delete(Number(catId));
+      }
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
