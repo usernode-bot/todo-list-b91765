@@ -240,3 +240,31 @@ test('the pending shot route picks a list that also shows a completed section', 
   assert.ok(s.current.items.some(i => i.checked), 'the opened list has a completed row to render');
   assert.ok(s.shotPendingIds.has(10), 'the pending marker goes on an open row');
 });
+
+test('the pending shot route prefers the earliest-created list when several qualify', async () => {
+  const s = load([]);
+  // Home returns newest-first, and a later demo list (the shared one, id 9)
+  // also holds both an open and a ticked row. The shot must stay on the
+  // earliest-created qualifying list, the fully populated demo list (id 1)
+  // the check draws its completed row from — not grab whatever was listed
+  // first.
+  s.api = async p => {
+    if (p === '/api/lists') {
+      return { lists: [{ id: 9, name: 'Demo: Shared Errands' }, { id: 1, name: 'Demo' }] };
+    }
+    return { list: { id: +p.split('/').pop() }, items: [
+      { id: 10, category_id: 1, checked: false, sort_order: 1 },
+      { id: 11, category_id: 1, checked: true, sort_order: 2 },
+    ] };
+  };
+  s.loadedId = null;
+  s.loadList = async id => {
+    s.loadedId = id;
+    const d = await s.api('/api/lists/' + id);
+    s.current = { list: d.list, categories: d.categories || [], items: d.items };
+  };
+  s.loadHome = async () => { s.loadedId = 'home'; };
+  s.repaintAllCategories = () => {};
+  await s.loadShotPending();
+  assert.equal(s.loadedId, 1, 'the earliest-created qualifying list wins');
+});
