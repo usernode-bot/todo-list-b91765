@@ -259,6 +259,23 @@
     .cat-toggle { min-height: 30px; text-align: left; }
     @media (prefers-reduced-motion: reduce) { .cat-head .chev { transition: none; } }
 
+    /* ── Category body open/close (issue #72) ─────────────────────────────
+       The body is never removed on a toggle: it stays mounted inside a grid
+       row that animates 1fr → 0fr, so the browser can interpolate its height.
+       The timing is the chevron's .18s ease, so the two read as one motion.
+       min-height: 0 on the child is what lets a 0fr row actually reach zero. */
+    .cat-body {
+      display: grid;
+      grid-template-rows: 1fr;
+      overflow: hidden;
+      transition: grid-template-rows .18s ease;
+    }
+    .cat-body > .un-group { min-height: 0; }
+    .cat-section[data-collapsed="1"] .cat-body { grid-template-rows: 0fr; }
+    .cat-section:not([data-collapsed="1"]) .cat-count { display: none; }
+    .cat-section[data-collapsed="1"] .cat-add { display: none; }
+    @media (prefers-reduced-motion: reduce) { .cat-body { transition: none; } }
+
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
       -webkit-user-select: none; user-select: none;
@@ -1515,8 +1532,31 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const collapsed = !catCollapsed(catId);
+      setCatCollapsed(catId, collapsed);
+      // Update the LIVE section rather than repainting it: a repaint inserts a
+      // fresh node already in its final state, and a newly inserted node never
+      // runs a CSS transition — the card would snap. Flipping the attribute on
+      // the live node lets the browser slide from its current height, including
+      // when a second tap reverses a slide already in progress.
+      const sec = document.getElementById('cat-' + catId);
+      if (!sec) return;
+      sec.dataset.collapsed = collapsed ? '1' : '0';
+      const btn = sec.querySelector('.cat-toggle');
+      if (btn) {
+        btn.setAttribute('aria-expanded', String(!collapsed));
+        btn.title = (collapsed ? 'Expand' : 'Collapse') + ' this category';
+      }
+      const body = sec.querySelector('.cat-body');
+      if (body) {
+        if (collapsed) {
+          body.setAttribute('inert', '');
+          body.setAttribute('aria-hidden', 'true');
+        } else {
+          body.removeAttribute('inert');
+          body.removeAttribute('aria-hidden');
+        }
+      }
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -2897,7 +2937,7 @@
       const idx = displayCategories().findIndex(x => x.id === c.id);
       const topGap = idx > 0 ? (fullyDone ? ' mt-4' : ' mt-6') : '';
       return `
-        <section id="cat-${c.id}" data-cat="${c.id}" class="cat-section${topGap}">
+        <section id="cat-${c.id}" data-cat="${c.id}" data-collapsed="${collapsed ? '1' : '0'}" class="cat-section${topGap}">
           ${isBucket ? '' : `
           <div class="cat-head flex items-center gap-1.5 px-2 py-1 mb-1.5">
             ${searching ? '' : `
@@ -2914,11 +2954,11 @@
               ${searching ? '' : `<span class="chev select-none" aria-hidden="true" style="color: var(--label2)">›</span>`}
               <h2 class="un-group-header flex-1 truncate text-left">${esc(c.name)}</h2>
             </button>
-            ${collapsed ? `
-            <span class="cat-count select-none text-[13px] px-1 shrink-0" style="color: var(--label3)">${collapsedCount}</span>` : ''}
-            ${searching || collapsed ? '' : `
+            ${searching ? '' : `
+            <span class="cat-count select-none text-[13px] px-1 shrink-0" style="color: var(--label3)">${collapsedCount}</span>`}
+            ${searching ? '' : `
             <button onclick="toggleAdder(${c.id})" title="Add an item"
-                    class="tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
+                    class="cat-add tinted text-[20px] px-1.5 leading-none font-light">+</button>`}
             <!-- Rename lost its home when the title became the collapse
                  control, so it gets an explicit one. Hover-revealed on desktop;
                  hidden on touch, where the header's swipe action already
@@ -2928,7 +2968,7 @@
             <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
-          ${collapsed ? '' : `
+          <div class="cat-body"${collapsed ? ' inert aria-hidden="true"' : ''}>
           <div class="un-group">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
@@ -2959,7 +2999,8 @@
               <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
             </button>`}
             ${showDone ? `<div class="done-items">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
-          </div>`}
+          </div>
+          </div>
         </section>`;
     }
 
@@ -3105,7 +3146,12 @@
           // Rows are wrapped in .un-swipe by attachSwipeActions; the
           // .empty-note placeholder makes empty categories valid drop
           // targets (moving the placeholder itself is undone below).
-          itemSelector: '.un-swipe:has(.item-row), .item-row.un-swipe, .empty-note',
+          // Collapsed sections are excluded so their clipped, inert rows are
+          // never liftable and never shift the drag indices; the kit reads this
+          // selector on every drag, so an expanded section is eligible again.
+          itemSelector: '.cat-section:not([data-collapsed="1"]) .un-swipe:has(.item-row), ' +
+                        '.cat-section:not([data-collapsed="1"]) .item-row.un-swipe, ' +
+                        '.cat-section:not([data-collapsed="1"]) .empty-note',
           handle: '.item-drag',
           onReorder: (from, to, el) => onItemReorder(el),
           // The repaint waits for the kit's drop spring to finish (issue #43):

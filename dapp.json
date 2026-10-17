@@ -158,6 +158,11 @@
       "expectText": "items"
     },
     {
+      "name": "A collapsed category keeps its body mounted for the slide",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".cat-section[data-collapsed=\"1\"] .cat-body[inert] > .un-group"
+    },
+    {
       "name": "The offline and storage read-out renders",
       "path": "/?shot=diag",
       "expectSelector": ".un-modal.modal-narrow .modal-card #diag-body",
