@@ -1515,8 +1515,9 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const collapsing = !catCollapsed(catId);
+      setCatCollapsed(catId, collapsing);
+      animateCatToggle(catId, collapsing);
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -3164,6 +3165,80 @@
           );
         } catch (_) { /* animation is decoration; the layout is already right */ }
       });
+    }
+
+    // --- category toggle animation (issue #72) ---------------------------------
+    // The whole-section outerHTML swap in repaintCategory is what makes
+    // collapsing read as a snap: the chevron above it rotates over .18s while
+    // the body just vanishes. This repaints exactly as before — header, chevron
+    // state, count and add button all answer the tap in the same frame — then
+    // slides only the body, borrowing the chevron's own timing so they read as
+    // one motion. Same guards and try/catch posture as flipRows: reduced
+    // motion, a missing Web Animations API, a missing section or body, or a
+    // zero height all fall through to the plain instant repaint, today's
+    // behaviour.
+    const CAT_TOGGLE_MS = 180;
+    const CAT_TOGGLE_EASE = 'ease';
+
+    function animateCatToggle(catId, collapsing) {
+      const ANIM_SUPPORTED = !prefersReducedMotion() &&
+        typeof Element.prototype.animate === 'function';
+      // Collapsing has to capture BEFORE the repaint: whatever is on screen
+      // (rows, the done divider, an adder with typed text) is what slides.
+      // Capture, repaint and insert happen in one synchronous task, so there is
+      // no frame where the body is missing.
+      let clone = null, h = 0;
+      if (collapsing) {
+        const sec = document.getElementById('cat-' + catId);
+        const body = sec && sec.querySelector(':scope > .un-group');
+        if (body) {
+          clone = body.cloneNode(true);
+          h = body.getBoundingClientRect().height;
+        }
+      }
+      repaintCategory(catId);
+      if (!ANIM_SUPPORTED) return;
+      const sec = document.getElementById('cat-' + catId);
+      try {
+        if (collapsing) {
+          if (!sec || !clone || !h) return; // zero-height bodies snap; nothing to slide
+          // The fresh collapsed render has no body, so the clone IS the slide:
+          // parked under the header at the captured height, inert and hidden
+          // from assistive tech, then shrunk away and dropped. It never goes
+          // through wireNative (inserted after that pass ran, rows still
+          // carrying their data-wired markers), so it has no live behaviour
+          // during the 180ms — a second tap mid-slide repaints the section,
+          // discarding it with the rest.
+          clone.setAttribute('aria-hidden', 'true');
+          clone.style.pointerEvents = 'none';
+          clone.style.height = h + 'px';
+          // The kit's wiring may have wrapped the header in a .un-swipe
+          // wrapper, so "right after the header" means after that wrapper:
+          // the clone lands as a child of the section itself, in flow, so its
+          // shrinking height is what the categories below glide with.
+          const head = sec.querySelector('.cat-head');
+          const anchor = head && head.closest('.un-swipe');
+          (anchor && anchor.parentElement === sec ? anchor : head).after(clone);
+          const anim = clone.animate(
+            [{ height: h + 'px', opacity: 1 }, { height: '0px', opacity: 0 }],
+            { duration: CAT_TOGGLE_MS, easing: CAT_TOGGLE_EASE }
+          );
+          const drop = () => clone.remove();
+          anim.onfinish = drop;
+          anim.oncancel = drop;
+        } else {
+          const body = sec && sec.querySelector(':scope > .un-group');
+          if (!body) return;
+          const h2 = body.getBoundingClientRect().height;
+          if (!h2) return;
+          // No fill: the keyframes end at the body's natural height, so the
+          // layout it settles on is the plain render's own.
+          body.animate(
+            [{ height: '0px', opacity: 0 }, { height: h2 + 'px', opacity: 1 }],
+            { duration: CAT_TOGGLE_MS, easing: CAT_TOGGLE_EASE }
+          );
+        }
+      } catch (_) { /* animation is decoration; the layout is already right */ }
     }
 
     // Set by onItemReorder, run when the kit says the drop has settled. The
