@@ -19,6 +19,8 @@
 // (the device looks connected, nothing gets through) used to hold the bare
 // install-time fetch open until the TCP stack gave up — no active worker, no
 // offline shell (issue #66). The bump drops the v8 caches.
+// v10: the shell's category cards slide open and shut instead of snapping
+// (issue #72), so the cached HTML has to be replaced.
 // v8: v7 moved the platform's files to a relative path on this app's own
 // origin. That routing turned out to be best-effort platform infrastructure —
 // when its shared asset backend cannot be reconciled the app's Ingress simply
@@ -27,7 +29,7 @@
 // INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
 // go stale the way the hostname before v7 did. The bump drops the v7 caches,
 // whose entries are keyed by paths that 404.
-const CACHE_VERSION = 'todo-v9';
+const CACHE_VERSION = 'todo-v10';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 

@@ -259,6 +259,13 @@
     .cat-toggle { min-height: 30px; text-align: left; }
     @media (prefers-reduced-motion: reduce) { .cat-head .chev { transition: none; } }
 
+    /* The card body's own open/close flight (issue #72). The kit's .un-group
+       already clips its contents; this is insurance for the frames where the
+       element's height is the animated value. A body on its way out is inert,
+       so no row can be ticked while the card shortens around it. */
+    .cat-body-anim { overflow: hidden; }
+    .cat-body[data-closing] { pointer-events: none; }
+
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
       -webkit-user-select: none; user-select: none;
@@ -1515,8 +1522,11 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      // Computed once and saved BEFORE the repaint, so a reload, a second tap
+      // or an interrupted animation all end on the last tapped state.
+      const closing = !catCollapsed(catId);
+      setCatCollapsed(catId, closing);
+      repaintCategory(catId, { closing });
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -2849,7 +2859,7 @@
       if (menuSheetHandle) menuSheetHandle.dismiss();
     }
 
-    function renderCategory(c) {
+    function renderCategory(c, opts) {
       // Active search: a matching category name shows all its items; otherwise
       // both sections filter to matching item text, and a category with no
       // matches disappears. Matching done items always render (bypassing
@@ -2885,6 +2895,9 @@
       // Whole-category collapse. The invisible bucket has no header, so it has
       // nothing to collapse from; a search owns visibility outright.
       const collapsed = !isBucket && !searching && catCollapsed(c.id);
+      // Closing (issue #72): the header is already the collapsed one, but the
+      // body is rendered one last time so it can be animated shut in place.
+      const closing = !!(opts && opts.closing) && collapsed;
       const total = unchecked.length + checked.length;
       // What the header says about what's hidden. A finished category counts
       // its done items (that IS everything); otherwise it counts the lot.
@@ -2928,8 +2941,8 @@
             <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
-          ${collapsed ? '' : `
-          <div class="un-group">
+          ${collapsed && !closing ? '' : `
+          <div class="un-group cat-body"${closing ? ' data-closing="1"' : ''}>
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
               <span class="tinted text-[18px] leading-none select-none">+</span>
@@ -3022,15 +3035,18 @@
 
     // Targeted repaints — swap just the affected category section so the rest
     // of the screen (and input focus elsewhere) is untouched.
-    function repaintCategory(catId) {
+    function repaintCategory(catId, opts) {
       // Mid-search an edit can hide the category entirely or leave zero
       // matches overall (the "No items match" note), so repaint everything.
       if (searchActive()) return repaintAllCategories();
       const c = current.categories.find(x => x.id === catId);
       const el = document.getElementById('cat-' + catId);
       if (!c || !el) return;
-      el.outerHTML = renderCategory(c);
+      el.outerHTML = renderCategory(c, opts);
       wireNative();
+      // Only a collapse toggle passes opts, so item ticks, adds, renames and
+      // search repaints stay instant (issue #72).
+      if (opts) animateCatBody(document.getElementById('cat-' + catId), opts.closing ? 'close' : 'open');
     }
     function repaintAllCategories() {
       const el = document.getElementById('cats');
@@ -3135,6 +3151,36 @@
 
     function prefersReducedMotion() {
       return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
+    // --- category body open/close (issue #72) ----------------------------------
+    // The card body's height, over the same quick beat the header chevron's
+    // CSS transition declares (.18s ease), so body and chevron read as one
+    // motion. Reduced motion, or no Web Animations, keeps today's snap.
+    const CAT_BODY_MS = 180;
+
+    function animateCatBody(section, mode) {
+      const body = section && section.querySelector('.cat-body');
+      if (!body) return;
+      const can = !prefersReducedMotion() && typeof body.animate === 'function';
+      const h = can ? body.getBoundingClientRect().height : 0;
+      if (mode === 'close' && (!can || h < 1)) { body.remove(); return; }
+      if (!can || h < 1) return;
+      body.classList.add('cat-body-anim');
+      const a = body.animate(
+        mode === 'close'
+          ? [{ height: h + 'px' }, { height: '0px' }]
+          : [{ height: '0px' }, { height: h + 'px' }],
+        { duration: CAT_BODY_MS, easing: 'ease' });
+      // fill is none: the closing body is taken out of the DOM, and the
+      // opening one is released at its natural height, so no inline height
+      // is kept once the flight ends.
+      const done = () => {
+        body.classList.remove('cat-body-anim');
+        if (mode === 'close') { body.remove(); wireNative(); }
+      };
+      a.addEventListener('finish', done);
+      a.addEventListener('cancel', done);
     }
 
     function flipRows(mutate) {

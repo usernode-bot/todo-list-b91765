@@ -158,6 +158,11 @@
       "expectText": "items"
     },
     {
+      "name": "The category card body carries the element that slides",
+      "path": "/?shot=drop",
+      "expectSelector": ".cat-section .cat-body.un-group"
+    },
+    {
       "name": "The offline and storage read-out renders",
       "path": "/?shot=diag",
       "expectSelector": ".un-modal.modal-narrow .modal-card #diag-body",
