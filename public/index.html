@@ -1516,7 +1516,7 @@
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
       setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      animateCatBody(catId, !catCollapsed(catId));
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -3037,6 +3037,102 @@
       if (el) { el.innerHTML = renderCats(); wireNative(); }
     }
 
+    // --- category body slide (issue #72) ----------------------------------------
+    // Tapping a category's name or chevron slides its body shut or open over
+    // the same quick beat the header chevron already turns (CAT_MS/CAT_EASE
+    // above), so the two read as one motion. The overflow clip exists only
+    // during the slide: at rest no element carries inline styles.
+    const catSlides = new Map(); // catId -> in-flight Web Animations
+    const catSlideGen = new Map(); // catId -> generation of the current slide
+
+    function animateCatBody(catId, opening) {
+      // Reduced motion, engines without the Web Animations API, or a call
+      // landing mid-search: today's instant snap.
+      if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function' || searchActive()) {
+        repaintCategory(catId);
+        return;
+      }
+      // A second tap mid-slide flips the state again; cancel the first slide
+      // so its finish handler can't repaint out from under this one. The state
+      // was written before the slide started, so a repaint — here or in a
+      // finish handler — always renders the stored preference.
+      const prev = catSlides.get(catId);
+      if (prev) prev.forEach(a => {
+        // Drop the handlers before cancelling: a cancel event is queued, not
+        // synchronous, and the old slide's cleanup must not fire after (and
+        // undo) this one's setup. The generation check below is the backstop.
+        a.onfinish = null; a.oncancel = null;
+        try { a.cancel(); } catch (_) { /* already gone */ }
+      });
+      catSlides.delete(catId);
+      const gen = (catSlideGen.get(catId) || 0) + 1;
+      catSlideGen.set(catId, gen);
+
+      if (!opening) {
+        // Closing: the expanded body is still on screen — slide it shut, then
+        // swap in the collapsed markup (the count appears as the slide ends).
+        const el = document.getElementById('cat-' + catId);
+        const body = el && el.querySelector('.un-group');
+        const chev = el && el.querySelector('.chev');
+        if (!el || !body || !chev) { repaintCategory(catId); return; }
+        slideCatBody(catId, gen, el, body, chev, false, () => {
+          if (el.isConnected) repaintCategory(catId);
+        });
+      } else {
+        // Opening: swap to the expanded markup first (the + button returns as
+        // the slide starts), then slide the fresh body open.
+        repaintCategory(catId);
+        const el = document.getElementById('cat-' + catId);
+        const body = el && el.querySelector('.un-group');
+        const chev = el && el.querySelector('.chev');
+        if (!el || !body || !chev) return;
+        slideCatBody(catId, gen, el, body, chev, true, null);
+      }
+    }
+
+    function slideCatBody(catId, gen, el, body, chev, opening, after) {
+      let settled = false;
+      const settle = cancelled => {
+        // Only the slide that is still this category's current one may clean
+        // up: a queued event from a superseded slide must not clear this
+        // slide's clip or repaint out from under it.
+        if (settled || catSlideGen.get(catId) !== gen) return;
+        settled = true;
+        catSlides.delete(catId);
+        if (el.isConnected) body.style.overflow = '';
+        // The closing repaint renders from the already-stored state, so an
+        // interruption in this window lands on the correct final render.
+        if (!cancelled && el.isConnected && after) after();
+      };
+      const h = body.offsetHeight;
+      // Clip the body while it's mid-slide: the height animation shrinks the
+      // box, and without the clip the rows would keep painting below it.
+      body.style.overflow = 'hidden';
+      const bodyFrames = opening
+        ? [{ height: '0px' }, { height: h + 'px' }]
+        : [{ height: h + 'px' }, { height: '0px' }];
+      const chevFrames = opening
+        ? [{ transform: 'rotate(0deg)' }, { transform: 'rotate(90deg)' }]
+        : [{ transform: 'rotate(90deg)' }, { transform: 'rotate(0deg)' }];
+      const anims = [];
+      try {
+        anims.push(body.animate(bodyFrames, { duration: CAT_MS, easing: CAT_EASE, fill: 'both' }));
+        anims.push(chev.animate(chevFrames, { duration: CAT_MS, easing: CAT_EASE, fill: 'both' }));
+      } catch (_) {
+        // Animation is decoration; the state is already stored — render it.
+        settle(true);
+        if (el.isConnected) repaintCategory(catId);
+        return;
+      }
+      catSlides.set(catId, anims);
+      anims.forEach(a => {
+        // fill:'both' holds the end state through the repaint; cancelling
+        // releases it so nothing at rest carries an animation effect.
+        a.onfinish = () => { settle(false); try { a.cancel(); } catch (_) { /* settled */ } };
+        a.oncancel = () => settle(true);
+      });
+    }
+
     // --- usernode-native attach pass ---------------------------------------------
     // The app re-renders by swapping innerHTML/outerHTML, so kit attachments
     // die with the old nodes. This runs after every render/repaint: swipe
@@ -3132,6 +3228,11 @@
     // Transforms only (never top/height), so nothing here can reflow the list.
     const FLIP_MS = 200;
     const FLIP_EASE = 'cubic-bezier(.22,.61,.36,1)';
+    // The category body slide (see animateCatBody) borrows the header
+    // chevron's own timing — the .cat-head .chev transition above — so the
+    // body and the chevron read as one motion.
+    const CAT_MS = 180;
+    const CAT_EASE = 'ease';
 
     function prefersReducedMotion() {
       return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
