@@ -1511,12 +1511,101 @@
       set.add(v ? id : -id);
       persistCollapsed();
     }
+    // --- category body slide (issue #72) ---------------------------------------
+    // The chevron rotates over .18s ease (see .cat-head .chev). The body borrows
+    // the same beat so the two read as one motion.
+    const CAT_BODY_MS = 180;
+    const CAT_BODY_EASE = 'ease';
+    const closingCats = new Map();  // catId -> { height, until }
+    const catBodyAnims = new Map(); // catId -> the Animation driving its body
+
+    function catClosingHeight(catId) {
+      const entry = closingCats.get(Number(catId));
+      if (!entry) return null;
+      // Another repaint (a sync, a reorder settle) can land mid slide. The entry
+      // expires by itself, so a lost finish callback can never leave a collapsed
+      // card holding its body open.
+      if (performance.now() > entry.until) {
+        closingCats.delete(Number(catId));
+        return null;
+      }
+      return entry.height;
+    }
+
+    function catBodyEl(catId) {
+      const sec = document.getElementById('cat-' + catId);
+      return sec ? sec.querySelector('.un-group') : null;
+    }
+
+    function canSlideCatBody() {
+      return !prefersReducedMotion() && typeof Element.prototype.animate === 'function';
+    }
+
+    function stopCatBodySlide(id) {
+      const anim = catBodyAnims.get(id);
+      if (!anim) return;
+      catBodyAnims.delete(id);
+      try { anim.cancel(); } catch (_) { /* a finished animation cancels fine */ }
+    }
+
     function toggleCatCollapsed(catId) {
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
+      const id = Number(catId);
+      const collapsing = !catCollapsed(catId);
+      const slide = canSlideCatBody();
+      const body = catBodyEl(catId);
+      // Measured before any running animation is cancelled, so a reversal starts
+      // from exactly where the card is.
+      const fromHeight = body ? Math.round(body.getBoundingClientRect().height) : 0;
+      setCatCollapsed(catId, collapsing);
+      stopCatBodySlide(id);
+      if (slide && collapsing) {
+        closingCats.set(id, { height: fromHeight, until: performance.now() + CAT_BODY_MS + 200 });
+      }
       repaintCategory(catId);
+      if (slide) slideCatBody(id, collapsing, fromHeight);
+    }
+
+    function slideCatBody(id, collapsing, fromHeight) {
+      const body = catBodyEl(id);
+      if (!body) return settleCatBody(id, collapsing);
+      const height = collapsing ? fromHeight : Math.round(body.getBoundingClientRect().height);
+      if (!height) return settleCatBody(id, collapsing);
+      const from = collapsing ? height : 0;
+      const to = collapsing ? 0 : height;
+      // Closing: renderCategory already drew the body at `height`. Opening: pin it
+      // shut before the first paint, so the card never flashes fully open.
+      body.style.overflow = 'hidden';
+      body.style.height = from + 'px';
+      let anim;
+      try {
+        anim = body.animate(
+          [{ height: from + 'px' }, { height: to + 'px' }],
+          { duration: CAT_BODY_MS, easing: CAT_BODY_EASE });
+      } catch (_) {
+        return settleCatBody(id, collapsing);
+      }
+      catBodyAnims.set(id, anim);
+      const done = () => {
+        if (catBodyAnims.get(id) !== anim) return; // a newer tap owns the card
+        catBodyAnims.delete(id);
+        settleCatBody(id, collapsing);
+      };
+      anim.onfinish = done;
+      // Backstop: a node replaced mid slide may never report a finish.
+      setTimeout(done, CAT_BODY_MS + 150);
+    }
+
+    function settleCatBody(id, collapsing) {
+      if (!collapsing) {
+        const body = catBodyEl(id);
+        if (body) { body.style.height = ''; body.style.overflow = ''; }
+        return;
+      }
+      closingCats.delete(id);
+      if (current) repaintCategory(id); // the collapsed card has no body at rest
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -2885,6 +2974,11 @@
       // Whole-category collapse. The invisible bucket has no header, so it has
       // nothing to collapse from; a search owns visibility outright.
       const collapsed = !isBucket && !searching && catCollapsed(c.id);
+      // Issue #72: a card that has just been collapsed keeps drawing its body
+      // for one short beat, at its old height, so the slide has something to
+      // shrink. catClosingHeight expires the entry by itself.
+      const closingH = collapsed ? catClosingHeight(c.id) : null;
+      const bodyShown = !collapsed || closingH != null;
       const total = unchecked.length + checked.length;
       // What the header says about what's hidden. A finished category counts
       // its done items (that IS everything); otherwise it counts the lot.
@@ -2928,8 +3022,8 @@
             <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
-          ${collapsed ? '' : `
-          <div class="un-group">
+          ${bodyShown ? `
+          <div class="un-group"${closingH != null ? ` style="height:${closingH}px; overflow:hidden"` : ''}>
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
               <span class="tinted text-[18px] leading-none select-none">+</span>
@@ -2959,7 +3053,7 @@
               <span>${checked.length} done</span><span>${showDone ? '▾' : '▸'}</span>
             </button>`}
             ${showDone ? `<div class="done-items">${checked.map(renderItem).join('')}</div>` : ''}` : ''}
-          </div>`}
+          </div>` : ''}
         </section>`;
     }
 
