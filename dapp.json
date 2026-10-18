@@ -128,7 +128,7 @@
       "name": "A checked item renders in its own completed section (issue #75)",
       "path": "/?shot=pending",
       "expectSelector": ".done-items .item-row[data-checked=\"1\"]",
-      "expectText": "Charge camera batteries"
+      "expectText": "Take out recycling"
     },
     {
       "name": "Undo is available in the list header after a change",
