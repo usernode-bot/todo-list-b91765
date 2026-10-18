@@ -1809,8 +1809,18 @@
       // shows a completed section with its checked row in place (issue #75).
       // Home orders newest-first and the newest demo list has nothing ticked,
       // so plain "first list" can't promise a completed section to check.
-      await loadList(await firstListWhere(lists, d =>
-        d.items.some(i => !i.checked) && d.items.some(i => i.checked)));
+      // Later demo lists qualify too (the shared one holds a ticked row), and
+      // newest-first puts them ahead of the fully populated list this shot was
+      // drawn from — so take the earliest-created qualifier, the same list on
+      // every fresh copy.
+      let pick = null;
+      for (const l of lists) {
+        let d = null;
+        try { d = await api('/api/lists/' + l.id); } catch (_) {}
+        if (d && d.items.some(i => !i.checked) && d.items.some(i => i.checked) &&
+            (pick === null || l.id < pick)) pick = l.id;
+      }
+      await loadList(pick === null ? lists[0].id : pick);
       if (!current || !current.items.length) return;
       const target = current.items.find(i => !i.checked) || current.items[0];
       shotPendingIds = new Set([target.id]);
@@ -2629,6 +2639,12 @@
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
              '-' + String(d.getDate()).padStart(2, '0');
     }
+    function tomorrowISO() {
+      const d = new Date();
+      d.setDate(d.getDate() + 1); // setDate rolls over months and years
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
     function nowHM() {
       const d = new Date();
       return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -2750,6 +2766,15 @@
     function clearDue(id) {
       applyDue(id, null, null);
       closeDueEditor();
+    }
+
+    // One-tap push to tomorrow (issue #99): the whole job of the row's
+    // "Tomorrow" button. Keeps any time the item already had; applyDue itself
+    // does nothing when the date is already tomorrow.
+    function dueTomorrow(id) {
+      const item = current && current.items.find(i => i.id === id);
+      if (!item || item.checked) return;
+      applyDue(id, tomorrowISO(), item.due_time || null);
     }
 
     // Owner-only, and only ever explicit: flipping this off leaves the dates on
@@ -3119,6 +3144,9 @@
           <button onclick="openDueEditor(rowId(this))" title="Add a due date" aria-label="Add a due date"
                   class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
                   style="color: var(--label3); border: 1px dashed var(--separator)">+ date</button>`) : ''}
+          ${dates && !i.checked && i.due_date !== tomorrowISO() ? `
+          <button onclick="dueTomorrow(rowId(this))" title="Move to tomorrow"
+                  class="due-tomorrow un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full ${BTN_SOFT}">Tomorrow</button>` : ''}
           <button onclick="editItem(rowId(this))" title="Edit"
                   class="hover-action opacity-0 group-hover:opacity-100 text-xs px-1" style="color: var(--label2)">✎</button>
           <button onclick="deleteItem(rowId(this))" title="Delete"

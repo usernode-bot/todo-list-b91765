@@ -142,6 +142,12 @@
       "expectText": "Today"
     },
     {
+      "name": "An open task offers a one-tap Tomorrow button beside its date",
+      "path": "/?shot=due",
+      "expectSelector": ".item-row .due-tomorrow",
+      "expectText": "Tomorrow"
+    },
+    {
       "name": "The due-date editor opens on the phone-width card",
       "path": "/?shot=dueeditor",
       "expectSelector": ".un-modal.modal-narrow .modal-card#due-editor #due-date-input",
