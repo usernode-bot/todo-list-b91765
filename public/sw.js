@@ -27,7 +27,8 @@
 // INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
 // go stale the way the hostname before v7 did. The bump drops the v7 caches,
 // whose entries are keyed by paths that 404.
-const CACHE_VERSION = 'todo-v9';
+// v10: the shell HTML now slides category cards open and closed (issue #72).
+const CACHE_VERSION = 'todo-v10';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
