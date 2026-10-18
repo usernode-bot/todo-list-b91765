@@ -108,6 +108,11 @@
       "expectText": "No items yet"
     },
     {
+      "name": "An expanded category's card body is the element the open/close slide drives",
+      "path": "/?shot=drop",
+      "expectSelector": ".cat-section .un-group.cat-body"
+    },
+    {
       "name": "A finished category keeps a lane to drop items into",
       "path": "/?shot=drop",
       "expectSelector": ".cat-section .active-items button.empty-note.done-note",

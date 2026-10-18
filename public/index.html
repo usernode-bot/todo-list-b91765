@@ -1511,12 +1511,61 @@
       set.add(v ? id : -id);
       persistCollapsed();
     }
+    // The card body slides open and shut over the same beat as the header
+    // chevron's own transform (`.cat-head .chev { transition: transform .18s
+    // ease; }`), so the two read as one motion.
+    const CAT_TOGGLE_MS = 180;
+
+    // Animate a .cat-body from one height to another, then hand the element
+    // back to normal layout. `fill: 'forwards'` holds the end value until the
+    // inline styles are cleared, so clearing them can't flash the full height
+    // for a frame. Callers own the element's lifetime.
+    function slideCatBody(body, from, to, done) {
+      body.style.overflow = 'hidden';
+      const anim = body.animate(
+        [{ height: from + 'px' }, { height: to + 'px' }],
+        { duration: CAT_TOGGLE_MS, easing: 'ease', fill: 'forwards' }
+      );
+      anim.finished.catch(() => {}).then(() => {
+        body.style.height = '';
+        body.style.overflow = '';
+        anim.cancel();
+        done();
+      });
+    }
+
     function toggleCatCollapsed(catId) {
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const collapsing = !catCollapsed(catId);
+      setCatCollapsed(catId, collapsing);
+      const sec = document.getElementById('cat-' + catId);
+      const body = sec && sec.querySelector('.cat-body');
+      const h = body ? body.offsetHeight : 0;
+      // Reduce Motion, an engine without the Web Animations API, or a body
+      // with nothing in it to slide keeps the instant snap: one repaint,
+      // exactly as before.
+      if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function'
+          || (collapsing && (!body || h <= 0))) {
+        repaintCategory(catId);
+        return;
+      }
+      repaintCategory(catId); // the header is correct from the moment of the tap
+      const fresh = document.getElementById('cat-' + catId);
+      if (collapsing) {
+        if (!fresh) return;
+        body.style.pointerEvents = 'none'; // the closing body takes no taps
+        body.setAttribute('aria-hidden', 'true');
+        fresh.appendChild(body); // slide the old body shut under the new header
+        slideCatBody(body, h, 0, () => body.remove());
+      } else {
+        const freshBody = fresh && fresh.querySelector('.cat-body');
+        if (!freshBody) return;
+        const to = freshBody.scrollHeight;
+        freshBody.style.height = '0px';
+        slideCatBody(freshBody, 0, to, () => {});
+      }
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -2929,7 +2978,7 @@
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
           ${collapsed ? '' : `
-          <div class="un-group">
+          <div class="un-group cat-body">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
               <span class="tinted text-[18px] leading-none select-none">+</span>

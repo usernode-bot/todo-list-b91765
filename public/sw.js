@@ -14,6 +14,8 @@
  * Bump CACHE_VERSION whenever the shell changes; activate drops every other
  * cache, so there is no stale-asset tail to reason about.
  */
+// v10: category cards slide open and shut (issue #72) — the shell HTML
+// changed, so installed copies are replaced. The bump drops the v9 caches.
 // v9: the same-origin precache and refreshShell() go through the same
 // 6-second deadline as the hosted assets. A connection that drops all packets
 // (the device looks connected, nothing gets through) used to hold the bare
@@ -27,7 +29,7 @@
 // INJECTED (see PLATFORM_ORIGIN below) rather than written down, so this cannot
 // go stale the way the hostname before v7 did. The bump drops the v7 caches,
 // whose entries are keyed by paths that 404.
-const CACHE_VERSION = 'todo-v9';
+const CACHE_VERSION = 'todo-v10';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const ASSET_CACHE = CACHE_VERSION + '-assets';
 
