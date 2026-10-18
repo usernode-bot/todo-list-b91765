@@ -404,6 +404,10 @@
       || shot === 'syncrefresh' || shot === 'syncfresh';
     const shotNocache = shot === 'nocache';
     const shotCollapsed = shot === 'collapsed';
+    // `?shot=catslide` freezes the collapse slide mid-flight — a state that
+    // lives for 180ms behind a tap, so the capture harness can only navigate.
+    // Display-only, like every shot link: it writes nothing to the database.
+    const shotCatslide = shot === 'catslide';
     const shotDiag = shot === 'diag';
     // `?shot=menu` opens a list with the ☰ menu already down, because the
     // completed-items actions (issue #68) only exist behind that tap.
@@ -1515,8 +1519,18 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
+      const collapsing = !catCollapsed(catId);
+      // Capture the body BEFORE the repaint: on the way shut the repaint emits
+      // no body at all, so it is the pre-repaint node — whose rows still carry
+      // their wire markers, so nothing needs re-attaching — that slides shut.
+      // A mid-flight re-toggle must not capture the flying node, which carries
+      // data-cat-anim while it slides (see slideCatBody).
+      const body = collapsing
+        ? document.querySelector('#cat-' + catId + ' .un-group:not([data-cat-anim])')
+        : null;
+      setCatCollapsed(catId, collapsing);
       repaintCategory(catId);
+      return slideCatBody(catId, collapsing, body);
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -1660,6 +1674,7 @@
       else if (shotSync) loadShotSync();
       else if (shotNocache) loadShotNocache();
       else if (shotCollapsed) loadShotCollapsed();
+      else if (shotCatslide) loadShotCatslide();
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
       else if (shotMenu) loadShotMenu();
@@ -1883,6 +1898,28 @@
       if (!target) return;
       setCatCollapsed(target.id, true);
       repaintAllCategories();
+    }
+
+    // Screenshot/test deep link — `/?shot=catslide` freezes the category
+    // collapse slide mid-flight by running the REAL toggle (capture, repaint,
+    // slide) and pausing the animation half way. A browser without the
+    // animation — reduced motion, no animate() — simply snaps, and the shot
+    // shows the landed collapsed state instead.
+    async function loadShotCatslide() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      if (!lists.length) return loadHome();
+      await loadList(await firstListWhere(lists, d => d.categories.some(
+        c => !c.is_default && d.items.some(i => i.category_id === c.id))));
+      if (!current) return;
+      const target = current.categories.find(c => !c.is_default
+        && current.items.some(i => i.category_id === c.id));
+      if (!target) return;
+      const anim = toggleCatCollapsed(target.id);
+      if (anim && typeof anim.pause === 'function') {
+        anim.pause();
+        anim.currentTime = CAT_SLIDE_MS / 2;
+      }
     }
 
     // Screenshot-state deep link — `/?shot=drop` opens a list with a FINISHED
@@ -3035,6 +3072,50 @@
     function repaintAllCategories() {
       const el = document.getElementById('cats');
       if (el) { el.innerHTML = renderCats(); wireNative(); }
+    }
+
+    // The collapse slide borrows the header chevron's existing timing — the
+    // .18s ease of .cat-head .chev — so the body and the chevron read as one
+    // motion. Second WAAPI animation after the reorder FLIP pass, which stays
+    // transforms-only because there a reflow would fight the drag; here the
+    // height reflow IS the effect: it is what makes the cards below slide
+    // along with the moving card instead of stepping.
+    const CAT_SLIDE_MS = 180;
+
+    function slideCatBody(catId, collapsing, captured) {
+      // Reduced motion, or a browser without animate(): instant snap, exactly
+      // the pre-animation behaviour — the same guard shape the FLIP pass uses.
+      if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function') return;
+      const el = document.getElementById('cat-' + catId);
+      const body = collapsing ? captured : el && el.querySelector('.un-group');
+      if (!el || !body) return;
+      // On the way shut the repaint left the section header-only, so the
+      // captured pre-repaint body moves back in directly under the header to
+      // slide from there. On the way open the body is the freshly rendered,
+      // already-wired one.
+      if (collapsing) {
+        const head = el.querySelector('.cat-head');
+        if (head) head.after(body);
+      }
+      const h = body.offsetHeight;
+      if (!h) { if (collapsing) body.remove(); return; }
+      body.dataset.catAnim = '1';
+      // The flying body can't be tapped or swiped: it is on its way out (or
+      // just unrolling), and a gesture landing in it would hit a ghost.
+      body.style.overflow = 'hidden';
+      body.style.pointerEvents = 'none';
+      const anim = collapsing
+        ? body.animate([{ height: h + 'px', opacity: 1 }, { height: '0px', opacity: 0 }],
+                       { duration: CAT_SLIDE_MS, easing: 'ease' })
+        : body.animate([{ height: '0px', opacity: 0 }, { height: h + 'px', opacity: 1 }],
+                       { duration: CAT_SLIDE_MS, easing: 'ease' });
+      anim.onfinish = () => {
+        if (collapsing) { body.remove(); return; } // the captured node's job is done
+        body.style.overflow = '';
+        body.style.pointerEvents = '';
+        delete body.dataset.catAnim;
+      };
+      return anim;
     }
 
     // --- usernode-native attach pass ---------------------------------------------

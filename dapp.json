@@ -152,6 +152,17 @@
       "expectSelector": ".cat-head button.cat-toggle[aria-expanded=true] .un-group-header"
     },
     {
+      "name": "An open category's body sits directly under its header, the shape the slide folds",
+      "path": "/?shot=empty",
+      "expectSelector": ".cat-section .cat-head + .un-group, .cat-section > .un-swipe + .un-group",
+      "expectText": "No items yet"
+    },
+    {
+      "name": "Collapsing slides the body shut mid-flight under its header, not a snap",
+      "path": "/?shot=catslide",
+      "expectSelector": ".cat-section .cat-head + .un-group[data-cat-anim]"
+    },
+    {
       "name": "A collapsed category hides its items and counts them instead",
       "path": "/?shot=collapsed",
       "expectSelector": ".cat-head .cat-toggle[aria-expanded=false] ~ .cat-count",
