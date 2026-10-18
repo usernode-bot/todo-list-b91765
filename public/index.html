@@ -259,6 +259,17 @@
     .cat-toggle { min-height: 30px; text-align: left; }
     @media (prefers-reduced-motion: reduce) { .cat-head .chev { transition: none; } }
 
+    /* ── Category body slide (issue #72) ─────────────────────────────────
+       The body re-renders with its section, so the slide is a height
+       animation driven inline by animateCatToggle() on the live .un-group —
+       the CSS here only supplies the shared timing. It mirrors the chevron's
+       .18s ease so the header and the body read as one motion. */
+    .cat-body-anim {
+      overflow: hidden;
+      transition: height .18s ease, opacity .18s ease;
+    }
+    @media (prefers-reduced-motion: reduce) { .cat-body-anim { transition: none; } }
+
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
     .item-row, .cat-head {
       -webkit-user-select: none; user-select: none;
@@ -1515,8 +1526,83 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
+      // A tap mid-slide settles the running slide first, so the second tap
+      // starts from a card at rest instead of fighting the first animation.
+      const pending = catSlideTimers.get(catId);
+      if (pending) pending();
+      const opening = catCollapsed(catId);
+      if (animateCatToggle(catId, opening)) return;
+      // Reduced motion (or nothing on screen to animate) keeps today's snap:
+      // `opening` is the state we're LEAVING, so write its opposite.
+      setCatCollapsed(catId, !opening);
       repaintCategory(catId);
+    }
+
+    // --- category body slide (issue #72) ---------------------------------------
+    // The card body slides instead of snapping while the header follows the
+    // state immediately: the chevron, the collapsed count and the + button are
+    // correct from the first frame (they re-render; the chevron keeps its own
+    // .18s rotation, which the slide mirrors). Collapsing animates the LIVE
+    // body down to nothing and then swaps in the collapsed render; expanding
+    // swaps in the expanded render first and slides its body up from 0.
+    const CAT_SLIDE_MS = 180; // same beat as the chevron's transform above
+    const catSlideTimers = new Map(); // catId -> settle() for the running slide
+
+    function animateCatToggle(catId, opening) {
+      if (prefersReducedMotion()) return false;
+      const sec = document.getElementById('cat-' + catId);
+      if (!sec) return false;
+      const settle = () => {
+        catSlideTimers.delete(catId);
+        const body = document.querySelector('#cat-' + catId + ' > .un-group');
+        if (opening) {
+          // Slide done: back to the stylesheet, no inline height left behind.
+          if (body) { body.classList.remove('cat-body-anim'); body.style.height = ''; body.style.opacity = ''; }
+        } else {
+          // The collapsed render has no body at all; dropping the slid-shut
+          // node lands the section exactly on renderCategory's collapsed HTML.
+          if (body) body.remove();
+          wireNative(); // drop the swipe/reorder wiring for the rows that left
+        }
+      };
+      let body;
+      if (opening) {
+        setCatCollapsed(catId, false);
+        repaintCategory(catId); // swaps the section; find the NEW body below
+        body = document.querySelector('#cat-' + catId + ' > .un-group');
+        if (!body) return true; // nothing to slide (e.g. repainted away)
+      } else {
+        body = sec.querySelector(':scope > .un-group');
+        if (!body) return false;
+        setCatCollapsed(catId, true);
+        swapCatHead(sec, catId); // header follows the state at once
+      }
+      // The target height is the body at rest — read it BEFORE the start
+      // styles clamp it, or height:0 would measure itself as its own target.
+      const target = body.offsetHeight;
+      body.classList.add('cat-body-anim');
+      body.style.height = (opening ? 0 : target) + 'px';
+      body.style.opacity = opening ? '0' : '1';
+      void body.offsetHeight; // reflow so the start height is committed
+      body.style.height = (opening ? target : 0) + 'px';
+      body.style.opacity = opening ? '1' : '0';
+      const t = setTimeout(settle, CAT_SLIDE_MS + 40); // 40ms: one missed frame
+      catSlideTimers.set(catId, () => { clearTimeout(t); settle(); });
+      return true;
+    }
+
+    // Re-render only the header, so the count appears and the + button leaves
+    // while the body below is still sliding shut (renderCategory emits the
+    // header for the CURRENT state; the live body belongs to the old one).
+    function swapCatHead(sec, catId) {
+      const c = current.categories.find(x => x.id === catId);
+      if (!c) return;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderCategory(c);
+      const fresh = tmp.querySelector('.cat-head');
+      const live = sec.querySelector('.cat-head');
+      if (fresh && live) live.replaceWith(fresh);
+      wireNative();
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
