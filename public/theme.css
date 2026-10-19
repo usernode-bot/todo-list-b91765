@@ -21,6 +21,8 @@
   --gray: #8e8e93;                    /* neutral swipe action */
   --tint: #2E9E8F;                    /* teal accent */
   --tint-deep: #1f7a6d;
+  --tint-text: #1f7a6d;               /* teal as TEXT: 4.8:1 on paper, where the
+                                         brighter --tint only reaches 3.0:1 */
   --danger: #ff3b30;                  /* systemRed */
   --bar: rgba(250, 246, 238, .82);    /* nav-bar wash over --bg */
 
@@ -54,6 +56,7 @@
   --gray: #8e8e93;
   --tint: #46b3a3;
   --tint-deep: #2E9E8F;
+  --tint-text: #46b3a3;               /* 6.8:1 on the dark ground already */
   --danger: #ff453a;
   --bar: rgba(19, 26, 44, .8);
 
@@ -72,7 +75,7 @@
 body { background: var(--bg); color: var(--label); font-family: 'Inter', system-ui, sans-serif; }
 /* Fraunces is the editorial voice — titles only; body copy stays Inter. */
 .un-navbar-title, .un-navbar-large { font-family: 'Fraunces', Georgia, serif; letter-spacing: -.01em; }
-.tinted { color: var(--tint); }
+.tinted { color: var(--tint-text); }
 
 /* ── Reminders-style circular checkbox (deliberately custom — the kit's
    only toggle is the un-switch, the wrong idiom for completing a todo) ── */
