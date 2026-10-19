@@ -8,6 +8,12 @@
       "expectSelector": "#app"
     },
     {
+      "name": "A viewer with no lists sees the empty Home, not the seeded card",
+      "path": "/?shot=emptylists",
+      "expectSelector": "#app .text-center button",
+      "expectText": "No lists yet"
+    },
+    {
       "name": "Native kit boots",
       "path": "/",
       "expectSelector": "html.un-ios, html.un-android, html.un-desktop"

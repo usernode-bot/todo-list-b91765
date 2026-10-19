@@ -23,6 +23,10 @@
   --tint-deep: #1f7a6d;
   --tint-text: #1f7a6d;               /* teal as TEXT: 4.8:1 on paper, where the
                                          brighter --tint only reaches 3.0:1 */
+  --tint-fill: #1f7a6d;               /* teal as a FILL under a white label:
+                                         4.7:1 with #fff, where --tint's 3.3:1
+                                         fails. Same in dark — the dark --tint
+                                         is lifted for text, not for fills. */
   --danger: #ff3b30;                  /* systemRed */
   --bar: rgba(250, 246, 238, .82);    /* nav-bar wash over --bg */
 

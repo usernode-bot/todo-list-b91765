@@ -403,6 +403,11 @@
     const shotSync = shot === 'syncbar' || shot === 'syncdone' || shot === 'synccap'
       || shot === 'syncrefresh' || shot === 'syncfresh';
     const shotNocache = shot === 'nocache';
+    // The no-lists Home state (?shot=emptylists): staging and first-run both
+    // seed example lists for a viewer with none, so the empty view the code
+    // already renders can never be seen on a seeded account. Like every shot
+    // link it is display-only — it writes nothing and reads nothing.
+    const shotEmptyLists = shot === 'emptylists';
     const shotCollapsed = shot === 'collapsed';
     const shotDiag = shot === 'diag';
     // `?shot=menu` opens a list with the ☰ menu already down, because the
@@ -1765,6 +1770,7 @@
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
       else if (shotMenu) loadShotMenu();
+      else if (shotEmptyLists) { renderHome([]); lastScreen = 'home'; }
       else loadHome();
     }
     window.addEventListener('hashchange', route);
@@ -2215,7 +2221,7 @@
             <div class="flex items-center gap-2">
               <button onclick="openImport('new')" class="needs-net tinted text-[15px] h-11 inline-flex items-center px-1">Import</button>
               <button onclick="newList(this)" title="New list" aria-label="New list"
-                      class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold" style="background: var(--tint); color: #fff">New list</button>
+                      class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold" style="background: var(--tint-fill); color: #fff">New list</button>
             </div>
           </div>
         </header>
@@ -2240,8 +2246,8 @@
             </div>
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16">
-             <p class="mb-4 text-[15px]" style="color: var(--label2)">No lists yet</p>
-             <button onclick="newList(this)" class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold" style="background: var(--tint); color: #fff">New list</button>
+             <p class="mb-4 text-[15px]" style="color: var(--label)">No lists yet</p>
+             <button onclick="newList(this)" class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold" style="background: var(--tint-fill); color: #fff">New list</button>
            </div>`}
       `;
       wireNative();
@@ -2270,7 +2276,7 @@
     function failedHomeNotice() {
       return `<div class="text-center py-16">
                 <p class="text-[15px]" style="color: var(--label)">Couldn't load your lists. Check your connection and try again.</p>
-                <button onclick="loadHome()" class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold mt-4" style="background: var(--tint); color: #fff">Try again</button>
+                <button onclick="loadHome()" class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold mt-4" style="background: var(--tint-fill); color: #fff">Try again</button>
               </div>`;
     }
 
