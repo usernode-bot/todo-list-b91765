@@ -96,9 +96,13 @@ test('#99: dueTomorrow moves an item to tomorrow and keeps its time', () => {
   assert.equal(s.commits.length, 1, 'one change queued');
   assert.equal(s.commits[0].method, 'PATCH');
   assert.equal(s.commits[0].path, '/api/items/10');
-  assert.deepEqual(plain(s.commits[0].body), { due_date: '2026-10-18', due_time: '09:30' });
+  // #102: applyDue's body and undo payload now carry repeat_rule too (null
+  // when the item doesn't repeat) — the shape the server's PATCH validates.
+  assert.deepEqual(plain(s.commits[0].body),
+    { due_date: '2026-10-18', due_time: '09:30', repeat_rule: null });
   assert.equal(s.records[0].kind, 'due', 'recorded for undo');
-  assert.deepEqual(plain(s.records[0].before), { due_date: '2026-10-17', due_time: '09:30' },
+  assert.deepEqual(plain(s.records[0].before),
+    { due_date: '2026-10-17', due_time: '09:30', repeat_rule: null },
     'undo holds the old date and time');
 });
 
@@ -106,7 +110,8 @@ test('#99: dueTomorrow gives a dateless item tomorrow with no time', () => {
   const s = load([{ id: 11, category_id: 1, checked: false }], { now: [2026, 9, 17] });
   s.dueTomorrow(11);
   const item = s.current.items.find(i => i.id === 11);
-  assert.deepEqual(plain(item), { id: 11, category_id: 1, checked: false, due_date: '2026-10-18', due_time: null });
+  assert.deepEqual(plain(item), { id: 11, category_id: 1, checked: false,
+    due_date: '2026-10-18', due_time: null, repeat_rule: null });
 });
 
 test('#99: dueTomorrow ignores a checked item', () => {

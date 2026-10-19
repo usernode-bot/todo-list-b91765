@@ -1242,7 +1242,7 @@
         .reduce((m, i) => Math.min(m, i.sort_order), 1);
       return { id, category_id: categoryId, text, checked: false, sort_order: min - 1,
                completed_at: null, created_by: me, last_checked_by: null,
-               due_date: null, due_time: null };
+               due_date: null, due_time: null, repeat_rule: null };
     }
 
     // Re-projects still-unsent changes onto a freshly fetched payload. Without
@@ -1267,15 +1267,20 @@
         } else if (op.type === 'edit') {
           d.items[idx] = { ...d.items[idx], text: op.body.text };
         } else if (op.type === 'due') {
+          // repeat_rule only when the op carries one (older queued ops don't).
           d.items[idx] = { ...d.items[idx],
-            due_date: op.body.due_date, due_time: op.body.due_time };
+            due_date: op.body.due_date, due_time: op.body.due_time,
+            ...(op.body.repeat_rule !== undefined
+              ? { repeat_rule: op.body.repeat_rule || null } : {}) };
         } else if (op.type === 'toggle') {
           const it = d.items[idx], checked = !!op.body.checked;
           // No sort_order change: the server keeps the rank within the
           // section too, so the recheck round trip returns the row to its spot.
           d.items[idx] = { ...it, checked,
             completed_at: checked ? (it.completed_at || new Date().toISOString()) : null,
-            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by };
+            last_checked_by: checked ? (me || it.last_checked_by) : it.last_checked_by,
+            ...(op.body.repeat_rule !== undefined
+              ? { repeat_rule: op.body.repeat_rule || null } : {}) };
         }
       }
       return d;
@@ -2659,6 +2664,30 @@
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
              '-' + String(d.getDate()).padStart(2, '0');
     }
+    // Repeating tasks (issue #102). The next due date, counted on from the
+    // task's OWN due date rather than from the day it was ticked, so a weekly
+    // Saturday chore stays on Saturdays even when ticked late — a task ticked
+    // days after its date can come back already overdue. Wall-clock in, wall-
+    // clock out, built the same way as todayISO. No date or no rule → null.
+    function nextDue(date, rule) {
+      const d = parseISODate(date);
+      if (!d || (rule !== 'daily' && rule !== 'weekly' && rule !== 'monthly')) return null;
+      if (rule === 'daily') d.setDate(d.getDate() + 1);
+      else if (rule === 'weekly') d.setDate(d.getDate() + 7);
+      else {
+        // Monthly: same day next month, clamped to that month's last day
+        // (31 January → 28 February, 29 in a leap year). Land on the 1st
+        // first, so the month arithmetic can't skip a short month, then ask
+        // the would-be next month how long it is.
+        const day = d.getDate();
+        d.setDate(1);
+        d.setMonth(d.getMonth() + 1);
+        d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+      }
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+    const REPEAT_TEXT = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
     function nowHM() {
       const d = new Date();
       return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -2708,14 +2737,20 @@
 
     // Applies a due date/time change: local first, queued for the server, and
     // recorded for undo — the same shape as every other item mutation, so it
-    // works offline too. Passing a null date clears the time with it.
-    function applyDue(id, date, time) {
+    // works offline too. Passing a null date clears the time with it. The
+    // fourth argument is the repeat rule (issue #102): omitted keeps whatever
+    // rule the item already has (dueTomorrow and every existing caller), an
+    // explicit null clears it (the editor's Clear and Never).
+    function applyDue(id, date, time, repeat) {
       const idx = current.items.findIndex(i => i.id === id);
       if (idx === -1) return false;
       const it = current.items[idx];
-      const before = { due_date: it.due_date || null, due_time: it.due_time || null };
-      const after = { due_date: date || null, due_time: date ? (time || null) : null };
-      if (before.due_date === after.due_date && before.due_time === after.due_time) return true;
+      const before = { due_date: it.due_date || null, due_time: it.due_time || null,
+                       repeat_rule: it.repeat_rule || null };
+      const after = { due_date: date || null, due_time: date ? (time || null) : null,
+                      repeat_rule: repeat === undefined ? before.repeat_rule : (repeat || null) };
+      if (before.due_date === after.due_date && before.due_time === after.due_time &&
+          before.repeat_rule === after.repeat_rule) return true;
       if (!commit({ type: 'due', itemId: id, method: 'PATCH',
                     path: '/api/items/' + id, body: after, undo: before })) return false;
       current.items[idx] = { ...it, ...after };
@@ -2757,8 +2792,21 @@
                  class="rounded-lg px-2.5 py-2 text-[15px] focus:outline-none"
                  style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
         </label>
+        <!-- Repeat (issue #102): how the task comes back once ticked. A repeat
+             without a date is allowed — an undated task repeats, undated. -->
+        <label class="flex items-center justify-between gap-3 text-[15px]">
+          <span>Repeat</span>
+          <select id="due-repeat-input"
+                  class="rounded-lg px-2.5 py-2 text-[15px] focus:outline-none"
+                  style="background: var(--fill); color: var(--label); border: 1px solid var(--separator)">
+            <option value="">Never</option>
+            <option value="daily"${item.repeat_rule === 'daily' ? ' selected' : ''}>Daily</option>
+            <option value="weekly"${item.repeat_rule === 'weekly' ? ' selected' : ''}>Weekly</option>
+            <option value="monthly"${item.repeat_rule === 'monthly' ? ' selected' : ''}>Monthly</option>
+          </select>
+        </label>
         <div class="flex flex-wrap justify-end gap-2 pt-1">
-          ${item.due_date ? `<button onclick="clearDue(${id})" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Clear</button>` : ''}
+          ${(item.due_date || item.repeat_rule) ? `<button onclick="clearDue(${id})" class="text-sm px-3 py-1.5 rounded-lg ${BTN_SOFT}">Clear</button>` : ''}
           <button onclick="saveDue(${id})" class="text-sm px-3 py-1.5 rounded-lg btn-primary">Save</button>
         </div>
       `;
@@ -2773,12 +2821,15 @@
     function saveDue(id) {
       const date = (document.getElementById('due-date-input') || {}).value || '';
       const time = (document.getElementById('due-time-input') || {}).value || '';
+      const repeat = (document.getElementById('due-repeat-input') || {}).value || '';
       if (!date && time) { toast('Pick a date first — a time on its own has nothing to be due on'); return; }
-      applyDue(id, date || null, time ? time.slice(0, 5) : null);
+      // A repeat with no date is allowed; the existing guard only covers a
+      // bare time (issue #102).
+      applyDue(id, date || null, time ? time.slice(0, 5) : null, repeat || null);
       closeDueEditor();
     }
     function clearDue(id) {
-      applyDue(id, null, null);
+      applyDue(id, null, null, null);
       closeDueEditor();
     }
 
@@ -3151,13 +3202,20 @@
                  title="Waiting to sync" aria-label="Waiting to sync">⋯</span>` : ''}
           ${i.last_checked_by ? `<span class="shrink-0 text-[11px]" style="color: var(--label3)" title="Last ${i.checked ? 'checked' : 'unchecked'} by @${esc(i.last_checked_by)}">${i.checked ? '✓' : '↺'} @${esc(i.last_checked_by)}</span>` : ''}
           ${dates ? (i.due_date ? `
-          <button onclick="openDueEditor(rowId(this))" title="Change due date"
+          <button onclick="openDueEditor(rowId(this))" title="${i.repeat_rule ? 'Repeats ' + esc(i.repeat_rule) : 'Change due date'}"
                   class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
                   style="background: var(--fill); color: var(--${overdue ? 'danger' : 'label2'})"
-                  data-due="${esc(i.due_date)}"${overdue ? ' data-overdue="1"' : ''}>${esc(dueLabel(i))}</button>` : `
+                  data-due="${esc(i.due_date)}"${i.repeat_rule ? ` data-repeat="${esc(i.repeat_rule)}"` : ''}${overdue ? ' data-overdue="1"' : ''}>${esc((i.repeat_rule ? '↻ ' : '') + dueLabel(i))}</button>` : (i.repeat_rule ? `
+          <!-- An undated repeating task still gets a pill (issue #102): solid,
+               like a dated chip, carrying just the repeat. -->
+          <button onclick="openDueEditor(rowId(this))" title="Repeats ${esc(i.repeat_rule)}"
+                  aria-label="Repeats ${esc(i.repeat_rule)} — tap to change"
+                  class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
+                  style="background: var(--fill); color: var(--label2)"
+                  data-repeat="${esc(i.repeat_rule)}">${esc('↻ ' + (REPEAT_TEXT[i.repeat_rule] || i.repeat_rule))}</button>` : `
           <button onclick="openDueEditor(rowId(this))" title="Add a due date" aria-label="Add a due date"
                   class="due-chip un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full"
-                  style="color: var(--label3); border: 1px dashed var(--separator)">+ date</button>`) : ''}
+                  style="color: var(--label3); border: 1px dashed var(--separator)">+ date</button>`)) : ''}
           ${dates && !i.checked && i.due_date !== tomorrowISO() ? `
           <button onclick="dueTomorrow(rowId(this))" title="Move to tomorrow"
                   class="due-tomorrow un-touch-target shrink-0 text-[11px] leading-none px-2 py-1 rounded-full ${BTN_SOFT}">Tomorrow</button>` : ''}
@@ -3625,7 +3683,12 @@
 
     function remapHistoryId(oldId, newId) {
       if (oldId === newId) return;
-      undoStack.concat(redoStack).forEach(e => { if (e.itemId === oldId) e.itemId = newId; });
+      undoStack.concat(redoStack).forEach(e => {
+        if (e.itemId === oldId) e.itemId = newId;
+        // A repeating tick's entry follows its spawned copy's id swap too, so
+        // an undo of that entry still finds (and removes) the copy.
+        if (e.spawnId === oldId) e.spawnId = newId;
+      });
     }
 
     // Runs one entry in one direction. Synchronous on purpose: every mutator it
@@ -3654,8 +3717,20 @@
         if (!found()) return false;
         const v = dir === 'undo' ? entry.before : entry.after;
         if (entry.kind === 'edit') return applyEditText(entry.itemId, v.text);
-        if (entry.kind === 'toggle') { toggleItem(entry.itemId, v.checked); return true; }
-        if (entry.kind === 'due') return applyDue(entry.itemId, v.due_date, v.due_time);
+        if (entry.kind === 'toggle') {
+          // A repeating tick (issue #102): the undo also removes the fresh
+          // copy the tick made, and hands the rule back to the original. The
+          // copy may already be gone (deleted by another member) — deleting a
+          // missing id is a no-op, and the original is restored regardless.
+          if (dir === 'undo' && entry.spawnId != null) deleteItem(entry.spawnId);
+          const spawned = toggleItem(entry.itemId, v.checked,
+            dir === 'undo' ? v.repeat_rule : undefined);
+          // Redo ticks the original again, which spawns a fresh copy with a
+          // new temp id — the entry follows it for the next undo.
+          if (dir === 'redo') entry.spawnId = spawned || null;
+          return true;
+        }
+        if (entry.kind === 'due') return applyDue(entry.itemId, v.due_date, v.due_time, v.repeat_rule);
         return false;
       } finally {
         historyBusy = false;
@@ -3792,20 +3867,39 @@
       return false;
     }
 
-    function toggleItem(id, checked) {
+    // Tick / untick. The third argument is the repeat rule to RESTORE on an
+    // untick (undo of a repeating tick hands it back); omitted, an untick just
+    // keeps whatever rule the row already carries. Ticking a repeating task
+    // clears its rule — the rule moves to the fresh copy spawnRepeat makes —
+    // so unticking and re-ticking the original never spawns a second copy,
+    // and the toggle body always carries the final repeat_rule so a fast
+    // tick/untick burst coalesces into one request the server agrees with.
+    // Returns the id of the spawned copy, or null when there wasn't one.
+    function toggleItem(id, checked, repeatRule) {
       const item = current.items.find(i => i.id === id);
-      if (!item) return;
+      if (!item) return null;
+      const prevRule = item.repeat_rule || null;
+      const ruleAfter = checked ? null
+        : (repeatRule === undefined ? prevRule : (repeatRule || null));
       const undo = { checked: item.checked, completed_at: item.completed_at,
-                     last_checked_by: item.last_checked_by, sort_order: item.sort_order };
+                     last_checked_by: item.last_checked_by, sort_order: item.sort_order,
+                     repeat_rule: prevRule };
       if (!commit({ type: 'toggle', itemId: id, method: 'PATCH',
-                    path: '/api/items/' + id, body: { checked }, undo })) return;
+                    path: '/api/items/' + id, body: { checked, repeat_rule: ruleAfter }, undo })) return null;
       // No sort_order change — the server keeps the rank within the section
       // too (issue #75), so the optimistic state matches the next refetch as
       // is: uncheck then recheck lands the row back where it was.
       item.checked = checked;
       item.completed_at = checked ? new Date().toISOString() : null;
       item.last_checked_by = checked ? (me || item.last_checked_by) : item.last_checked_by;
-      record({ kind: 'toggle', itemId: id, before: { checked: undo.checked }, after: { checked } });
+      item.repeat_rule = ruleAfter;
+      // Spawn the next occurrence (issue #102) BEFORE recording history, so
+      // the tick's single undo entry can carry the copy's id with it.
+      const spawnId = checked && prevRule ? spawnRepeat(item, prevRule) : null;
+      record({ kind: 'toggle', itemId: id,
+               before: { checked: undo.checked, repeat_rule: prevRule },
+               after: { checked, repeat_rule: ruleAfter },
+               spawnId });
       cacheList();
       // Issue #93: only close the category when its done list is already
       // hidden. With the completed rows showing, record an explicit keep-open
@@ -3813,11 +3907,48 @@
       // finished-means-shut default; unchecking later still lands on the open
       // default. Hidden done list keeps the old behaviour (issue #79): drop
       // any keep-open marker so the finished default (collapsed) applies.
+      // The fresh copy above is an open row in this category, so a category
+      // whose last open item was just ticked off is NOT "fully done" while it
+      // repeats.
       if (checked && isCatFullyDone(item.category_id)) {
         if (catShowDone(item.category_id)) setCatCollapsed(item.category_id, false);
         else clearKeepOpen(item.category_id);
       }
       repaintCategory(item.category_id);
+      return spawnId;
+    }
+
+    // The next occurrence of a repeating task (issue #102): a fresh copy with
+    // the same name, category and time, due on the next date. Made HERE on the
+    // client, in the same tap, through the ordinary add-then-due op pair — the
+    // server never spawns copies itself, so an offline tick shows the copy
+    // instantly and there is no double insert when it syncs (client_op_id
+    // keeps a replayed add from inserting twice). Undated tasks come back
+    // undated, with no due op at all. If the copy can't be queued (storage
+    // full) the tick still stands and commit's toast explains; no undo entry
+    // is recorded here — the tick's own entry carries spawnId instead.
+    function spawnRepeat(item, rule) {
+      const tempId = tempSeq--;
+      if (!commit({ type: 'add', itemId: tempId, method: 'POST',
+                    path: '/api/categories/' + item.category_id + '/items',
+                    body: { text: item.text, repeat_rule: rule } })) return null;
+      const copy = localNewItem(tempId, item.category_id, item.text);
+      copy.repeat_rule = rule;
+      current.items.push(copy);
+      cacheList();
+      // The copy's due date is part of the same tap, not a separate undoable
+      // action — historyBusy suppresses applyDue's own history entry. Saved
+      // and restored rather than cleared: an undo replay already holds the
+      // guard, and clearing it here would let the replay's own steps record.
+      const wasBusy = historyBusy;
+      historyBusy = true;
+      try {
+        const next = nextDue(item.due_date, rule);
+        if (next) applyDue(tempId, next, item.due_time || null);
+      } finally {
+        historyBusy = wasBusy;
+      }
+      return tempId;
     }
 
     async function editItem(id) {
@@ -3875,12 +4006,15 @@
       const tempId = tempSeq--;
       if (!commit({ type: 'add', itemId: tempId, method: 'POST',
                     path: '/api/categories/' + cat.id + '/items',
-                    body: { text: snap.text } })) return null;
+                    body: { text: snap.text, repeat_rule: snap.repeat_rule || null } })) return null;
       const item = localNewItem(tempId, cat.id, snap.text);
       current.items.push(item);
       cacheList();
       repaintCategory(cat.id);
       if (snap.checked) toggleItem(tempId, true);
+      // The repeat comes back with the item (issue #102), set after the tick
+      // above so a restored completed row can never spawn a copy of its own.
+      item.repeat_rule = snap.repeat_rule || null;
       if (snap.due_date) applyDue(tempId, snap.due_date, snap.due_time || null);
       return tempId;
     }
