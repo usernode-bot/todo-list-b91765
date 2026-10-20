@@ -324,7 +324,8 @@ app.get('/api/lists/:id', async (req, res) => {
       // the client then re-interprets in its own zone and shifts by a day.
       pool.query(`SELECT i.id, i.category_id, i.text, i.checked, i.sort_order, i.completed_at, i.created_by, i.last_checked_by,
                          to_char(i.due_date, 'YYYY-MM-DD') AS due_date,
-                         to_char(i.due_time, 'HH24:MI') AS due_time
+                         to_char(i.due_time, 'HH24:MI') AS due_time,
+                         i.repeat_rule
                     FROM items i JOIN categories c ON i.category_id = c.id
                    WHERE c.list_id = $1
                    ORDER BY i.checked, i.sort_order, i.id`, [list.id]),
@@ -860,6 +861,16 @@ function clientOpId(body) {
   return typeof v === 'string' && CLIENT_OP_ID_RE.test(v) ? v : null;
 }
 
+// repeat_rule validator (issue #102): NULL means not repeating; otherwise one
+// of the three supported cadences. Returns { ok, value } so every endpoint can
+// reject a bad value BEFORE any write runs, the way due_date/due_time do.
+const REPEAT_RULES = new Set(['daily', 'weekly', 'monthly']);
+function repeatRuleOf(v) {
+  if (v === null || v === undefined || v === '') return { ok: true, value: null };
+  return REPEAT_RULES.has(v) ? { ok: true, value: v } : { ok: false, value: null };
+}
+const REPEAT_RULE_ERROR = 'repeat_rule must be daily, weekly, monthly or null';
+
 // Looks up a previous create by its idempotency key and re-checks access, so a
 // retry can only ever return a row the caller is still allowed to see.
 async function itemByClientOpId(opId, user) {
@@ -884,14 +895,17 @@ app.post('/api/lists/:id/items', async (req, res) => {
     // (no second insert, no second notify — nothing changed).
     const prior = await itemByClientOpId(opId, req.user);
     if (prior) return res.json(prior);
+    // Optional repeat rule (issue #102); rejected before any write.
+    const rep = repeatRuleOf(req.body.repeat_rule);
+    if (!rep.ok) return res.status(400).json({ error: REPEAT_RULE_ERROR });
     const category = await ensureDefaultCategory(list.id);
     const { rows } = await pool.query(
-      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id, repeat_rule)
        VALUES ($1, $2, FALSE,
                COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1), 1) - 1,
-               $3, $4)
+               $3, $4, $5)
        RETURNING *`,
-      [category.id, text, req.user.username, opId]
+      [category.id, text, req.user.username, opId, rep.value]
     );
     notify(list.id, req);
     res.json({ item: rows[0], category });
@@ -909,13 +923,16 @@ app.post('/api/categories/:id/items', async (req, res) => {
     const opId = clientOpId(req.body);
     const prior = await itemByClientOpId(opId, req.user);
     if (prior) return res.json({ item: prior.item });
+    // Optional repeat rule (issue #102); rejected before any write.
+    const rep = repeatRuleOf(req.body.repeat_rule);
+    if (!rep.ok) return res.status(400).json({ error: REPEAT_RULE_ERROR });
     const { rows } = await pool.query(
-      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id)
+      `INSERT INTO items (category_id, text, checked, sort_order, created_by, client_op_id, repeat_rule)
        VALUES ($1, $2, FALSE,
                COALESCE((SELECT MIN(sort_order) FROM items WHERE category_id = $1), 1) - 1,
-               $3, $4)
+               $3, $4, $5)
        RETURNING *`,
-      [category.id, text, req.user.username, opId]
+      [category.id, text, req.user.username, opId, rep.value]
     );
     notify(category.list_id, req);
     res.json({ item: rows[0] });
@@ -934,6 +951,17 @@ app.patch('/api/items/:id', async (req, res) => {
   try {
     const { item, list, role } = await getItemAccess(req.params.id, req.user);
     if (!item || !role) return res.status(404).json({ error: 'Item not found' });
+
+    // Repeat rule (issue #102), validated BEFORE any other field's UPDATE runs,
+    // so a bad value leaves the row untouched. Completing a repeating task is
+    // the client handing the rule over: the tick sets repeat_rule to null and
+    // the fresh copy (created by the client, like every add) carries the rule.
+    let repeatUpdate;
+    if (req.body.repeat_rule !== undefined) {
+      const rep = repeatRuleOf(req.body.repeat_rule);
+      if (!rep.ok) return res.status(400).json({ error: REPEAT_RULE_ERROR });
+      repeatUpdate = rep.value;
+    }
 
     if (typeof req.body.text === 'string') {
       const text = req.body.text.trim();
@@ -996,10 +1024,15 @@ app.patch('/api/items/:id', async (req, res) => {
           WHERE id = $2`, [t, item.id]);
     }
 
+    if (repeatUpdate !== undefined) {
+      await pool.query(`UPDATE items SET repeat_rule = $1 WHERE id = $2`, [repeatUpdate, item.id]);
+    }
+
     const { rows } = await pool.query(
       `SELECT id, category_id, text, checked, sort_order, completed_at, created_by, last_checked_by,
               to_char(due_date, 'YYYY-MM-DD') AS due_date,
-              to_char(due_time, 'HH24:MI') AS due_time
+              to_char(due_time, 'HH24:MI') AS due_time,
+              repeat_rule
          FROM items WHERE id = $1`, [item.id]);
     notify(list.id, req);
     res.json({ item: rows[0] });
@@ -1218,6 +1251,16 @@ async function seedDemoListFor(user) {
          ($1, 'Someday: learn to sail', FALSE, 5, NULL, $2, NULL, NULL)`,
       [datedGeneral.id, user.username]
     );
+    // A repeating task (issue #102) in the same list, so the ↻ chip and the
+    // repeat row in the due-date editor have data in staging. Due on the next
+    // Saturday (DOW 6), relative to CURRENT_DATE so the seed never goes stale;
+    // a separate INSERT so the five rows above are untouched.
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, due_date, due_time, repeat_rule)
+       VALUES ($1, 'Grocery run', FALSE, 6, NULL, $2,
+               CURRENT_DATE + ((6 - EXTRACT(DOW FROM CURRENT_DATE)::int + 7) % 7), NULL, 'weekly')`,
+      [datedGeneral.id, user.username]
+    );
     // A second shared list carrying only a removal event, so the Home
     // screen can show the 'removed' hint ("@staging-demo-user removed …")
     // without displacing the 'checked' hint on the first shared list —
@@ -1389,6 +1432,10 @@ async function start() {
     -- the date clears the time (enforced in PATCH /api/items/:id).
     ALTER TABLE items ADD COLUMN IF NOT EXISTS due_date DATE;
     ALTER TABLE items ADD COLUMN IF NOT EXISTS due_time TIME;
+    -- Repeating tasks (issue #102): NULL means not repeating; otherwise one of
+    -- 'daily' | 'weekly' | 'monthly', validated in code before any write.
+    -- Append-only, no backfill — existing rows simply don't repeat.
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS repeat_rule TEXT;
     COMMENT ON TABLE items IS 'staging:private';
     CREATE INDEX IF NOT EXISTS items_category_idx ON items (category_id);
     CREATE INDEX IF NOT EXISTS items_due_idx ON items (due_date) WHERE due_date IS NOT NULL;
