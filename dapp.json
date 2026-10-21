@@ -158,6 +158,11 @@
       "expectText": "items"
     },
     {
+      "name": "An expanded category's body is the element that slides open and shut",
+      "path": "/?shot=collapsed",
+      "expectSelector": ".cat-section .cat-body.un-group"
+    },
+    {
       "name": "The offline and storage read-out renders",
       "path": "/?shot=diag",
       "expectSelector": ".un-modal.modal-narrow .modal-card #diag-body",

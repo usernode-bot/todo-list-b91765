@@ -1515,8 +1515,9 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      const collapsing = !catCollapsed(catId);
+      setCatCollapsed(catId, collapsing);
+      repaintCategoryAnimated(catId, collapsing);
     }
 
     // Categories whose "Add an item…" input is currently revealed by the
@@ -2929,7 +2930,7 @@
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
           ${collapsed ? '' : `
-          <div class="un-group">
+          <div class="cat-body un-group">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
               <span class="tinted text-[18px] leading-none select-none">+</span>
@@ -3035,6 +3036,60 @@
     function repaintAllCategories() {
       const el = document.getElementById('cats');
       if (el) { el.innerHTML = renderCats(); wireNative(); }
+    }
+
+    // --- category open/close slide ---------------------------------------------
+    // Same quick beat as the header chevron's CSS transition (.18s ease), so the
+    // arrow, the count and the card body read as one motion. The body is clipped
+    // while its height is animated — rows keep their height and slide under the
+    // header instead of being squashed. Reduced motion keeps the instant snap.
+    const CAT_TOGGLE_MS = 180;
+
+    function repaintCategoryAnimated(catId, collapsing) {
+      const sec = document.getElementById('cat-' + catId);
+      if (!sec) return;
+      const oldBody = sec.querySelector('.cat-body');
+      const openH = oldBody ? oldBody.getBoundingClientRect().height : 0;
+
+      if (prefersReducedMotion() || typeof Element.prototype.animate !== 'function') {
+        repaintCategory(catId);
+        return;
+      }
+
+      // A second tap can land mid-slide. Drop any animation still running on
+      // this body before it is reused, so the new slide starts from where the
+      // body is now instead of fighting the old one's onfinish.
+      if (oldBody && oldBody.getAnimations) {
+        oldBody.getAnimations().forEach(a => a.cancel());
+      }
+
+      repaintCategory(catId); // header, count, + and aria-expanded update now
+      const next = document.getElementById('cat-' + catId);
+      if (!next) return;
+
+      if (collapsing) {
+        if (!oldBody) return;
+        next.appendChild(oldBody); // same place: directly under the header
+        oldBody.style.overflow = 'hidden';
+        try {
+          const a = oldBody.animate(
+            [{ height: openH + 'px' }, { height: '0px' }],
+            { duration: CAT_TOGGLE_MS, easing: 'ease', fill: 'forwards' });
+          a.onfinish = () => oldBody.remove();
+        } catch (_) { oldBody.remove(); }
+        return;
+      }
+
+      const body = next.querySelector('.cat-body');
+      if (!body) return;
+      body.style.overflow = 'hidden';
+      const h = body.getBoundingClientRect().height;
+      try {
+        const a = body.animate(
+          [{ height: '0px' }, { height: h + 'px' }],
+          { duration: CAT_TOGGLE_MS, easing: 'ease' });
+        a.onfinish = () => { a.cancel(); body.style.overflow = ''; };
+      } catch (_) { body.style.overflow = ''; }
     }
 
     // --- usernode-native attach pass ---------------------------------------------
