@@ -1515,9 +1515,66 @@
       // Same guard as toggleCatDone: mid-search the header renders without its
       // chevron and the filter owns what's visible, so don't mutate behind it.
       if (searchActive()) return;
-      setCatCollapsed(catId, !catCollapsed(catId));
-      repaintCategory(catId);
+      animateCategoryToggle(catId, catCollapsed(catId));
     }
+
+    // --- category open/close animation (issue #72) ---
+    // The body used to be inserted or removed in one DOM operation, so the
+    // card snapped. Now it slides its height shut or open over the same beat
+    // as the chevron's rotation. State is written at the tap (so the chevron,
+    // the collapsed count and the + button change immediately, as before) and
+    // the height is the only thing that takes time. Nothing here is
+    // persisted; the collapse preference above is unchanged.
+    const CAT_ANIM_MS = 180;          // matches .cat-head .chev's .18s
+    const CAT_ANIM_EASE = 'ease';
+    const catAnimations = new Map();  // category id to running Animation
+
+    function animateCategoryToggle(catId, opening) {
+      const c = current && current.categories.find(x => x.id === catId);
+      const el = document.getElementById('cat-' + catId);
+      const body = el && el.querySelector('.un-group');
+      // Measured before the cancel, so a retap mid-slide starts from where the
+      // body is on screen rather than from either end.
+      const fromH = body ? body.getBoundingClientRect().height : 0;
+      const running = catAnimations.get(catId);
+      if (running) { running.cancel(); catAnimations.delete(catId); }
+
+      setCatCollapsed(catId, !opening);
+
+      const canAnimate = typeof Element.prototype.animate === 'function'
+                         && !prefersReducedMotion();
+      if (!canAnimate || !c || !el) { repaintCategory(catId); return; }
+
+      // Keep the body in the markup while it closes, so there is something to
+      // slide. Everything else about the render — the header, the collapsed
+      // count, the + button — already reflects the new state.
+      el.outerHTML = renderCategory(c, !opening);
+      wireNative();
+
+      const next = document.getElementById('cat-' + catId);
+      const live = next && next.querySelector('.un-group');
+      if (!live) { repaintCategory(catId); return; }
+
+      const fullH = live.getBoundingClientRect().height;
+      const startH = Math.min(fromH, fullH);
+      live.style.overflow = 'hidden';
+      live.style.height = startH + 'px';
+      void live.offsetHeight; // force layout so the animation starts from startH
+
+      const anim = live.animate(
+        [{ height: startH + 'px' }, { height: (opening ? fullH : 0) + 'px' }],
+        { duration: CAT_ANIM_MS, easing: CAT_ANIM_EASE });
+      catAnimations.set(catId, anim);
+      anim.finished.then(() => {
+        // A newer tap (or any other repaint) owns the section now: leave its
+        // node entirely alone.
+        if (catAnimations.get(catId) !== anim) return;
+        catAnimations.delete(catId);
+        if (opening) { live.style.height = ''; live.style.overflow = ''; }
+        else repaintCategory(catId);
+      }).catch(() => { /* cancelled by the next tap: it owns the body */ });
+    }
+    // --- end category open/close animation ---
 
     // Categories whose "Add an item…" input is currently revealed by the
     // header + button.
@@ -2849,7 +2906,10 @@
       if (menuSheetHandle) menuSheetHandle.dismiss();
     }
 
-    function renderCategory(c) {
+    // `keepBody` renders the body even when the category is collapsed, which
+    // is how the close animation has something to slide shut (issue #72). The
+    // header keys off `collapsed` alone, so it flips at the start of the slide.
+    function renderCategory(c, keepBody) {
       // Active search: a matching category name shows all its items; otherwise
       // both sections filter to matching item text, and a category with no
       // matches disappears. Matching done items always render (bypassing
@@ -2928,7 +2988,7 @@
             <button onclick="deleteCategory(${c.id}, this)" title="Delete category"
                     class="needs-net cat-del hover:!text-red-500 text-sm px-1.5 leading-none" style="color: var(--label3)">✕</button>
           </div>`}
-          ${collapsed ? '' : `
+          ${collapsed && !keepBody ? '' : `
           <div class="un-group">
             ${openAdders.has(c.id) && !searching ? `
             <form onsubmit="return addItem(event, ${c.id})" class="un-group-row flex items-center gap-2.5 px-4 py-2">
