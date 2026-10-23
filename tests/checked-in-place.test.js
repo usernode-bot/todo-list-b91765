@@ -41,6 +41,7 @@ const LIFTED = [
   'catCollapsed', 'setCatCollapsed', 'clearKeepOpen', 'toggleItem', 'localNewItem',
   'itemOrder', 'sectionItems', 'renderCategory', 'renderItem',
   'esc', 'todayISO', 'nowHM', 'isOverdue', 'displayCategories', 'showCompleted',
+  'dailyOn', 'dayOfTick', 'dayLabel',
   'catShowDone', 'firstListWhere', 'loadShotPending',
 ];
 

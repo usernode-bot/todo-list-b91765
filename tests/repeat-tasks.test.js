@@ -42,7 +42,7 @@ const plain = o => ({ ...o });
 
 const LIFTED = [
   'esc', 'todayISO', 'tomorrowISO', 'nowHM', 'parseISODate', 'fmtDueTime',
-  'dueLabel', 'isOverdue', 'nextDue', 'applyDue', 'toggleItem', 'spawnRepeat',
+  'dayLabel', 'dueLabel', 'isOverdue', 'nextDue', 'applyDue', 'toggleItem', 'spawnRepeat',
   'localNewItem', 'deleteItem', 'runHistory', 'remapHistoryId',
   'isCatFullyDone', 'renderItem', 'saveDue', 'clearDue',
 ];
