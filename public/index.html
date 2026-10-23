@@ -2272,11 +2272,12 @@
                 </div>
                 ${activityLine(l)}
               </div>
-              <span class="text-[20px] leading-none font-semibold shrink-0" style="color: var(--label3)">›</span>
+              <span class="text-[20px] leading-none font-semibold shrink-0" style="color: var(--label2)">›</span>
             </div>
           </a>`).join('') + '</div>'
         : `<div class="text-center py-16">
-             <p class="mb-4 text-[15px]" style="color: var(--label)">No lists yet</p>
+             <p class="text-[15px]" style="color: var(--label)">No lists yet</p>
+             <p class="mt-1 mb-4 text-[13px]" style="color: var(--label2)">Create a list to start adding items</p>
              <button onclick="newList(this)" class="needs-net inline-flex items-center h-11 px-4 rounded-full text-[15px] font-semibold" style="background: var(--tint-fill); color: #fff">New list</button>
            </div>`}
       `;
