@@ -39,7 +39,7 @@ const plain = o => ({ ...o });
 
 const LIFTED = [
   'esc', 'todayISO', 'tomorrowISO', 'nowHM', 'parseISODate', 'fmtDueTime',
-  'dueLabel', 'isOverdue', 'applyDue', 'dueTomorrow', 'renderItem',
+  'dayLabel', 'dueLabel', 'isOverdue', 'applyDue', 'dueTomorrow', 'renderItem',
 ];
 
 // A Date whose no-argument constructor reads as a fixed wall-clock moment

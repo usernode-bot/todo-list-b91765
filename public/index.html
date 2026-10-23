@@ -255,8 +255,9 @@
     .cat-head .chev { font-size: 17px; transition: transform .18s ease; }
     /* One rotating chevron rather than a swapped ▶/▼ pair: two glyphs have two
        optical centres, which is half of why the row looked like it jumped. */
-    .cat-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
-    .cat-toggle { min-height: 30px; text-align: left; }
+    .cat-toggle[aria-expanded="true"] .chev,
+    .day-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+    .cat-toggle, .day-toggle { min-height: 30px; text-align: left; }
     @media (prefers-reduced-motion: reduce) { .cat-head .chev { transition: none; } }
 
     /* Long-press is a gesture (drag / swipe), not a text-selection trigger. */
@@ -373,6 +374,9 @@
     // neither is reachable by navigation. Display-only, in every environment.
     const shotLoading = shot === 'loading';
     const shotPending = shot === 'pending';
+    // `?shot=daily` opens the first daily list (issue #109), which no plain
+    // navigation can single out: it lives behind a settings switch.
+    const shotDaily = shot === 'daily';
     // Screenshot/test deep links for the states this change introduces: an
     // empty category's tappable "No items yet" row (?shot=empty), the header
     // with undo available (?shot=undo), a list with due dates on (?shot=due)
@@ -991,6 +995,15 @@
             return q;
           }
         }
+      } else if (op.type === 'rollover') {
+        // One rollover per list is enough; a second open before the first is
+        // sent replaces it with the same day rather than queueing a copy.
+        for (let i = q.length - 1; i >= first; i--) {
+          if (q[i].type === 'rollover' && q[i].path === op.path) {
+            q[i] = { ...op, opId: q[i].opId };
+            return q;
+          }
+        }
       } else if (op.type === 'delete') {
         // A delete supersedes every unsent change to that item. If its create
         // is still queued the item never reached the server at all, so both
@@ -1081,6 +1094,12 @@
         if (!isTempId(op.itemId)) {
           await api('/api/items/' + op.itemId, { method: 'DELETE', timeoutMs: MUTATION_TIMEOUT_MS });
         }
+      } else if (op.type === 'rollover') {
+        // Daily list carryover (issue #109): idempotent and forward-only, so a
+        // replay after a timeout changes nothing the first one didn't.
+        await api(op.path, {
+          method: 'POST', body: JSON.stringify(op.body || {}), timeoutMs: MUTATION_TIMEOUT_MS,
+        });
       }
       saveQueue(loadQueue().slice(1));
     }
@@ -1505,7 +1524,7 @@
     }
     // Dropped whenever the open list changes, so one list's collapse state can
     // never bleed into another's.
-    function resetCollapsed() { collapsedIds = null; }
+    function resetCollapsed() { collapsedIds = null; resetOpenDays(); }
     function persistCollapsed() {
       if (!current || !collapsedIds) return;
       cacheSet(collapsedKey(current.list.id), [...collapsedIds]);
@@ -1770,6 +1789,7 @@
       else if (shotDrop) loadShotDrop();
       else if (shotDiag) loadShotDiag();
       else if (shotMenu) loadShotMenu();
+      else if (shotDaily) loadShotDaily();
       else if (shotEmptyLists) { renderHome([]); lastScreen = 'home'; }
       else loadHome();
     }
@@ -2051,6 +2071,16 @@
     // Screenshot-state deep link — `/?shot=undo` opens a list with the undo
     // button live, which otherwise takes a mutation to reach. The entry it
     // stages describes a change already on screen, so nothing is written.
+    // `?shot=daily` opens the first daily list (issue #109). Its first open
+    // rolls yesterday's unfinished task forward, exactly as a person's would.
+    async function loadShotDaily() {
+      let lists = [];
+      try { ({ lists } = await api('/api/lists')); } catch (_) {}
+      const target = lists.find(l => l.daily_enabled) || lists[0];
+      if (!target) return loadHome();
+      await loadList(target.id);
+    }
+
     async function loadShotUndo() {
       let lists = [];
       try { ({ lists } = await api('/api/lists')); } catch (_) {}
@@ -2319,6 +2349,7 @@
       return [
         String(row.name == null ? '' : row.name),
         row.due_dates_enabled ? 1 : 0,
+        row.daily_enabled ? 1 : 0,
         Number(row.open_count) || 0,
         Number(row.done_count) || 0,
       ].join('\u0000');
@@ -2331,6 +2362,7 @@
       return [
         String(list.name == null ? '' : list.name),
         list.due_dates_enabled ? 1 : 0,
+        list.daily_enabled ? 1 : 0,
         open,
         done,
       ].join('\u0000');
@@ -2558,6 +2590,7 @@
       showingSaved = !!cached;
       if (cached) {
         current = applyPendingOps(cached);
+        maybeRollover(); // a new day carries over offline, before the paint
         touchList(id);
         renderScreen(() => renderList(current), type);
         lastScreen = 'list';
@@ -2592,6 +2625,7 @@
       showingSaved = false; // this is live data now, not the saved copy
       const before = painted ? JSON.stringify(current) : null;
       current = applyPendingOps(data);
+      maybeRollover();
       cacheList();
       stampFetched(id, data); // `data`, not `current`: what the SERVER said
       if (painted && before === JSON.stringify(current)) return; // nothing changed
@@ -2692,6 +2726,51 @@
     const datesOn = () => !!(current && current.list && current.list.due_dates_enabled);
     const LOCALE = (jwt && jwt.locale) || undefined;
 
+    // --- daily lists (issue #109) -----------------------------------------------
+    // A daily list opens on today: unfinished tasks dated before today move to
+    // today, and ticked tasks keep the day they were ticked in a folded section
+    // below. The list itself never changes, and every day follows the phone's
+    // own date, not the server's.
+    function dailyOn() { return !!(current && current.list && current.list.daily_enabled); }
+
+    // The day a ticked item belongs to: the phone's local date of completed_at,
+    // built the same way as todayISO. Rows from before completed_at existed had
+    // none, and count as today.
+    function dayOfTick(i) {
+      if (!i.completed_at) return todayISO();
+      const d = new Date(i.completed_at);
+      if (isNaN(d.getTime())) return todayISO();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+
+    // The carryover itself, applied locally first so the screen is right even
+    // offline. Pure, and safe to run twice: only unchecked, non-repeating,
+    // dated items dated before today move; undated and later ones stay put.
+    function rolloverLocal(d, today) {
+      if (!d || !Array.isArray(d.items)) return d;
+      for (const i of d.items) {
+        if (i.checked || i.repeat_rule || !i.due_date) continue;
+        if (i.due_date < today) i.due_date = today;
+      }
+      if (d.list) d.list.last_rollover_date = today;
+      return d;
+    }
+
+    // Runs on the first open of a new local day. The server call is
+    // forward-only, so replaying it (or another member opening at the same
+    // time) does nothing extra. Deliberately not recorded for undo: it isn't
+    // something the person did.
+    function maybeRollover() {
+      if (!current || !dailyOn()) return;
+      const today = todayISO();
+      if ((current.list.last_rollover_date || '') >= today) return;
+      rolloverLocal(current, today);
+      cacheList();
+      commit({ type: 'rollover', method: 'POST',
+               path: '/api/lists/' + current.list.id + '/rollover', body: { today } });
+    }
+
     function todayISO() {
       const d = new Date();
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
@@ -2744,24 +2823,27 @@
       } catch (_) { return t; }
     }
 
-    // Short, human label for the chip: the nearby days get names, the rest get
-    // a date. Deliberately never "in 3 days" — a weekday is easier to act on.
-    function dueLabel(i) {
-      const d = parseISODate(i.due_date);
+    // Short, human label for a day: the nearby days get names, the rest get a
+    // date. Deliberately never "in 3 days" — a weekday is easier to act on.
+    // Shared by the due chip and the daily list's day sections (issue #109), so
+    // a past day's heading reads exactly like the chip it replaces.
+    function dayLabel(iso) {
+      const d = parseISODate(iso);
       if (!d) return '';
       const t = parseISODate(todayISO());
       const diff = Math.round((d - t) / 86400000);
-      let day;
-      if (diff === 0) day = 'Today';
-      else if (diff === 1) day = 'Tomorrow';
-      else if (diff === -1) day = 'Yesterday';
-      else if (diff > 1 && diff < 7) day = d.toLocaleDateString(LOCALE, { weekday: 'short' });
-      else {
-        const opts = { month: 'short', day: 'numeric' };
-        if (d.getFullYear() !== t.getFullYear()) opts.year = 'numeric';
-        day = d.toLocaleDateString(LOCALE, opts);
-      }
-      return day + (i.due_time ? ' · ' + fmtDueTime(i.due_time) : '');
+      if (diff === 0) return 'Today';
+      if (diff === 1) return 'Tomorrow';
+      if (diff === -1) return 'Yesterday';
+      if (diff > 1 && diff < 7) return d.toLocaleDateString(LOCALE, { weekday: 'short' });
+      if (diff < -1 && diff > -7) return d.toLocaleDateString(LOCALE, { weekday: 'short' });
+      const opts = { month: 'short', day: 'numeric' };
+      if (d.getFullYear() !== t.getFullYear()) opts.year = 'numeric';
+      return d.toLocaleDateString(LOCALE, opts);
+    }
+    function dueLabel(i) {
+      if (!parseISODate(i.due_date)) return '';
+      return dayLabel(i.due_date) + (i.due_time ? ' · ' + fmtDueTime(i.due_time) : '');
     }
 
     // Overdue is a fact worth colouring, not a scolding: a ticked item is never
@@ -2908,6 +2990,35 @@
       document.querySelectorAll('.due-switch').forEach(sw => { sw.checked = datesOn(); });
     }
 
+    // Owner-only, like the due-dates switch. Turning it on gives the list the
+    // daily view straight away (a new day may already be waiting to roll
+    // over); turning it off restores the ordinary list and deletes nothing.
+    async function setDaily(v) {
+      if (!current) return;
+      if (!isOnline()) { requireOnline(); syncDailySwitch(); return; }
+      const prev = !!current.list.daily_enabled;
+      current.list.daily_enabled = !!v;
+      cacheList();
+      closeDrawer();
+      try {
+        await api('/api/lists/' + current.list.id, {
+          method: 'PATCH', body: JSON.stringify({ daily_enabled: !!v }),
+          timeoutMs: MUTATION_TIMEOUT_MS,
+        });
+        if (v) maybeRollover();
+        renderList(current);
+        toast(v ? 'Daily list on: unfinished tasks move to each new day' : 'Daily list off');
+      } catch (e) {
+        current.list.daily_enabled = prev;
+        cacheList();
+        renderList(current);
+        reportWriteError(e);
+      }
+    }
+    function syncDailySwitch() {
+      document.querySelectorAll('.daily-switch').forEach(sw => { sw.checked = dailyOn(); });
+    }
+
     // The row handle stays visible in a dated list — as an explanation rather
     // than a dead control, since the reason it doesn't drag isn't obvious.
     function dateSortHint() {
@@ -2932,6 +3043,53 @@
       return html;
     }
 
+    // --- daily list: earlier days (issue #109) ---------------------------------
+    // Ticked tasks from before today, one folded section per day, newest first.
+    // Which days are open is kept in memory only — leaving the list folds them
+    // all again. Rows reuse renderItem, and live outside #cats so the reorder
+    // kit never offers to drag them.
+    let openDays = null;
+    function openDaysSet() {
+      if (!openDays) openDays = new Set();
+      return openDays;
+    }
+    function resetOpenDays() { openDays = null; }
+    function toggleDay(day) {
+      const set = openDaysSet();
+      if (set.has(day)) set.delete(day); else set.add(day);
+      const el = document.getElementById('days');
+      if (el) { el.innerHTML = renderDays(); wireNative(); }
+    }
+    function renderDays() {
+      if (!dailyOn() || searchActive() || !current) return '';
+      const today = todayISO();
+      const byDay = new Map();
+      for (const i of current.items) {
+        if (!i.checked) continue;
+        const d = dayOfTick(i);
+        if (d >= today) continue; // today's ticks stay in their categories
+        if (!byDay.has(d)) byDay.set(d, []);
+        byDay.get(d).push(i);
+      }
+      return [...byDay.keys()].sort().reverse().map(d => {
+        const items = byDay.get(d);
+        const open = openDaysSet().has(d);
+        return `
+        <section class="day-section mt-4" data-day="${esc(d)}">
+          <div class="cat-head flex items-center gap-1.5 px-2 py-1 mb-1.5">
+            <button type="button" class="day-toggle flex-1 min-w-0 flex items-center gap-1.5"
+                    onclick="toggleDay('${esc(d)}')" aria-expanded="${open ? 'true' : 'false'}"
+                    title="${open ? 'Fold' : 'Open'} ${esc(dayLabel(d))}">
+              <span class="chev select-none" aria-hidden="true" style="color: var(--label2)">›</span>
+              <h2 class="un-group-header flex-1 truncate text-left">${esc(dayLabel(d))}</h2>
+            </button>
+            <span class="cat-count select-none text-[13px] px-1 shrink-0" style="color: var(--label3)">${items.length} done</span>
+          </div>
+          ${open ? `<div class="un-group">${items.map(renderItem).join('')}</div>` : ''}
+        </section>`;
+      }).join('');
+    }
+
     // Menu items shared by the desktop dropdown and the touch bottom sheet.
     function drawerItemsHtml(isOwner, sheet) {
       const c = sheet ? 'sheet-row un-pressable' : DRAWER_ITEM;
@@ -2951,6 +3109,11 @@
         <label class="${c} cursor-pointer">
           <span>Include due dates</span>
           <input type="checkbox" class="un-switch due-switch" ${datesOn() ? 'checked' : ''} onchange="setDueDates(this.checked)">
+        </label>
+        <!-- Daily list (issue #109), owner-only, directly under due dates. -->
+        <label class="${c} cursor-pointer">
+          <span>Daily list</span>
+          <input type="checkbox" class="un-switch daily-switch" ${dailyOn() ? 'checked' : ''} onchange="setDaily(this.checked)">
         </label>` : ''}
         <button onclick="closeDrawer(); openDiagnostics()" class="${c}">Offline &amp; storage</button>
         <button onclick="closeDrawer(); openExport()" class="${c}">Export markdown</button>
@@ -3029,9 +3192,17 @@
                  class="flex-1 bg-transparent text-[16px] focus:outline-none py-0.5" style="color: var(--label)">
         </form>
 
+        ${dailyOn() && !searchActive() ? `
+        <div class="cat-head daily-today flex items-center gap-1.5 px-2 py-1 mb-1.5">
+          <h2 class="un-group-header flex-1 truncate text-left">Today</h2>
+        </div>` : ''}
         <div id="cats">
           ${renderCats()}
         </div>
+        ${dailyOn() && !searchActive() ? `
+        <!-- Earlier days, folded, outside #cats so the reorder kit never
+             sees their rows (issue #109). -->
+        <div id="days">${renderDays()}</div>` : ''}
 
         <form id="new-cat-form" onsubmit="return addCategory(event)" class="needs-net ${searchActive() ? 'hidden ' : ''}mt-7 flex items-center gap-2 px-4">
           <span class="tinted text-[18px] leading-none select-none">+</span>
@@ -3099,6 +3270,11 @@
       // to the top of the completed section rather than its end.
       let unchecked = sectionItems(c.id, false);
       let checked = sectionItems(c.id, true);
+      // Daily list (issue #109): today's view counts only what was ticked
+      // today. Earlier days live in their own folded sections below (see
+      // renderDays). sectionItems itself is untouched, so the markdown export
+      // still sees every ticked task. A search shows every match, as anywhere.
+      if (dailyOn() && !searching) checked = checked.filter(i => dayOfTick(i) === todayISO());
       if (searching && !catMatches) {
         unchecked = unchecked.filter(i => i.text.toLowerCase().includes(q));
         checked = checked.filter(i => i.text.toLowerCase().includes(q));
@@ -3275,6 +3451,12 @@
       const el = document.getElementById('cat-' + catId);
       if (!c || !el) return;
       el.outerHTML = renderCategory(c);
+      // Ticking or unticking a row moves it between today and the day
+      // sections, so the daily list repaints those alongside the category.
+      if (dailyOn()) {
+        const days = document.getElementById('days');
+        if (days) days.innerHTML = renderDays();
+      }
       wireNative();
     }
     function repaintAllCategories() {

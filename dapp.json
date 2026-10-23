@@ -1,7 +1,28 @@
 {
-  "icon": { "image": "brand/icon.png", "emoji": "📝" },
+  "icon": {
+    "image": "brand/icon.png",
+    "emoji": "\ud83d\udcdd"
+  },
   "secrets": [],
   "tests": [
+    {
+      "name": "A daily list opens under a Today heading",
+      "path": "/?shot=daily",
+      "expectSelector": "#app .daily-today .un-group-header",
+      "expectText": "Today"
+    },
+    {
+      "name": "An earlier day sits folded below a daily list, counted",
+      "path": "/?shot=daily",
+      "expectSelector": "#days .day-section .day-toggle[aria-expanded=false]",
+      "expectText": "Yesterday"
+    },
+    {
+      "name": "A list's menu offers the owner a Daily list switch",
+      "path": "/?shot=menu",
+      "expectSelector": "#drawer label input.daily-switch",
+      "expectText": "Daily list"
+    },
     {
       "name": "App shell loads",
       "path": "/",
@@ -122,7 +143,7 @@
       "name": "A finished category keeps a lane to drop items into",
       "path": "/?shot=drop",
       "expectSelector": ".cat-section .active-items button.empty-note.done-note",
-      "expectText": "All done — add another"
+      "expectText": "All done \u2014 add another"
     },
     {
       "name": "The finished category still shows its completed section beside that lane",
@@ -157,7 +178,7 @@
       "name": "A repeating task shows its repeat mark on its date pill",
       "path": "/?shot=due",
       "expectSelector": ".item-row .due-chip[data-repeat]",
-      "expectText": "↻"
+      "expectText": "\u21bb"
     },
     {
       "name": "The due-date editor offers a repeat choice",
@@ -226,7 +247,7 @@
       "name": "A pass that only brings saved copies up to date says so",
       "path": "/?shot=syncrefresh",
       "expectSelector": "#sync-bar:not(.hidden) .sync-track .sync-fill",
-      "expectText": "Updating saved lists… 1 of 3"
+      "expectText": "Updating saved lists\u2026 1 of 3"
     },
     {
       "name": "...and confirms the saved copies are current, not newly saved",

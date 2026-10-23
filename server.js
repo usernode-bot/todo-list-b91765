@@ -245,6 +245,7 @@ app.get('/api/lists', async (req, res) => {
     await seedExampleListsFor(req.user);
     const { rows } = await pool.query(
       `SELECT l.id, l.name, l.owner_id, l.owner_username, l.created_at, l.due_dates_enabled,
+              l.daily_enabled,
               (l.owner_id = $1) AS is_owner,
               (SELECT COUNT(*) FROM list_members m WHERE m.list_id = l.id) AS member_count,
               (SELECT COUNT(*) FROM items i JOIN categories c ON i.category_id = c.id
@@ -316,7 +317,7 @@ app.get('/api/lists/:id', async (req, res) => {
     const { list, role } = await getListRole(req.params.id, req.user);
     if (!list || !role) return res.status(404).json({ error: 'List not found' });
 
-    const [cats, items, members] = await Promise.all([
+    const [cats, items, members, roll] = await Promise.all([
       pool.query(`SELECT id, name, is_default, sort_order FROM categories
                    WHERE list_id = $1 ORDER BY sort_order, id`, [list.id]),
       // due_date/due_time go over the wire as plain strings via to_char: pg
@@ -331,12 +332,18 @@ app.get('/api/lists/:id', async (req, res) => {
                    ORDER BY i.checked, i.sort_order, i.id`, [list.id]),
       pool.query(`SELECT id, user_id, username, added_at FROM list_members
                    WHERE list_id = $1 ORDER BY added_at`, [list.id]),
+      // Same reason as due_date above: a DATE as a JS Date would be the
+      // server's midnight, so it goes over the wire as a plain string.
+      pool.query(`SELECT to_char(last_rollover_date, 'YYYY-MM-DD') AS last_rollover_date
+                    FROM lists WHERE id = $1`, [list.id]),
     ]);
 
     res.json({
       list: {
         id: list.id, name: list.name, owner_id: list.owner_id, owner_username: list.owner_username,
         due_dates_enabled: !!list.due_dates_enabled,
+        daily_enabled: !!list.daily_enabled,
+        last_rollover_date: (roll.rows[0] && roll.rows[0].last_rollover_date) || null,
       },
       role,
       categories: cats.rows,
@@ -358,7 +365,8 @@ app.patch('/api/lists/:id', async (req, res) => {
 
     const wantsName = req.body.name !== undefined;
     const wantsDates = typeof req.body.due_dates_enabled === 'boolean';
-    if (!wantsName && !wantsDates) return res.status(400).json({ error: 'Nothing to update' });
+    const wantsDaily = typeof req.body.daily_enabled === 'boolean';
+    if (!wantsName && !wantsDates && !wantsDaily) return res.status(400).json({ error: 'Nothing to update' });
 
     if (wantsName) {
       const name = (req.body.name || '').trim();
@@ -371,10 +379,73 @@ app.patch('/api/lists/:id', async (req, res) => {
       // Turning the setting off keeps the dates on disk: flipping it back on
       // restores what was there rather than silently destroying data.
     }
+    if (wantsDaily) {
+      // Turning daily off leaves last_rollover_date alone: nothing is deleted,
+      // and turning it back on doesn't replay old rollovers.
+      await pool.query(`UPDATE lists SET daily_enabled = $1 WHERE id = $2`,
+        [req.body.daily_enabled, list.id]);
+    }
     notify(list.id, req);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily lists (issue #109): the first open of a new local day carries every
+// unfinished task dated before today forward to today. The client does the same
+// move locally first (so the screen is right offline) and then strips it back
+// out of the queue if this endpoint fails. Forward-only and idempotent: the
+// conditional UPDATE on `lists` moves a day at most once, however many people
+// open the list at once or replay the same request.
+app.post('/api/lists/:id/rollover', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { list, role } = await getListRole(req.params.id, req.user);
+    // Any member may trigger it, like ticking an item; only the owner flips the
+    // setting itself (PATCH above).
+    if (!list || !role) return res.status(404).json({ error: 'List not found' });
+
+    const today = req.body && req.body.today;
+    if (typeof today !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(today)) {
+      return res.status(400).json({ error: 'today must be YYYY-MM-DD' });
+    }
+    // The day comes from the phone's own date. A ±1 day window covers every
+    // timezone; anything further out is a wrong clock or a queue replayed days
+    // later, and must not drag the list's task dates with it.
+    const inRange = await pool.query(
+      `SELECT $1::date BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE + 1 AS ok`, [today]
+    );
+    if (!inRange.rows[0].ok) return res.status(400).json({ error: 'today is not near the server date' });
+
+    await client.query('BEGIN');
+    const moved = await client.query(
+      `UPDATE lists SET last_rollover_date = $2
+        WHERE id = $1 AND daily_enabled IS TRUE
+          AND (last_rollover_date IS NULL OR last_rollover_date < $2)
+        RETURNING id`, [list.id, today]
+    );
+    if (!moved.rows.length) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, rolled: false });
+    }
+    await client.query(
+      `UPDATE items i SET due_date = $2
+         FROM categories c
+        WHERE i.category_id = c.id AND c.list_id = $1
+          AND NOT i.checked
+          AND i.repeat_rule IS NULL
+          AND i.due_date IS NOT NULL
+          AND i.due_date < $2`, [list.id, today]
+    );
+    await client.query('COMMIT');
+    notify(list.id, req);
+    res.json({ ok: true, rolled: true });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -1261,6 +1332,29 @@ async function seedDemoListFor(user) {
                CURRENT_DATE + ((6 - EXTRACT(DOW FROM CURRENT_DATE)::int + 7) % 7), NULL, 'weekly')`,
       [datedGeneral.id, user.username]
     );
+    // A daily list (issue #109), seeded BEFORE the shared list below so that
+    // one keeps the highest id and stays the newest list ?shot=pending and
+    // ?shot=undo open first. last_rollover_date is yesterday, so the very first
+    // open rolls "Plan the week" (due yesterday) forward to today, and the two
+    // tasks ticked a day or two ago land in earlier-day sections.
+    const daily = (await client.query(
+      `INSERT INTO lists (name, owner_id, owner_username, daily_enabled, due_dates_enabled, last_rollover_date)
+       VALUES ($1, $2, $3, TRUE, TRUE, CURRENT_DATE - 1) RETURNING id`,
+      ['Demo: Daily', user.id, user.username]
+    )).rows[0];
+    const dailyGeneral = (await client.query(
+      `INSERT INTO categories (list_id, name, is_default, sort_order) VALUES ($1, 'General', TRUE, 0) RETURNING id`,
+      [daily.id]
+    )).rows[0];
+    await client.query(
+      `INSERT INTO items (category_id, text, checked, sort_order, completed_at, created_by, due_date) VALUES
+         ($1, 'Plan the week', FALSE, 1, NULL, $2, CURRENT_DATE - 1),
+         ($1, 'Reply to Sam', FALSE, 2, NULL, $2, CURRENT_DATE),
+         ($1, 'Stretch for ten minutes', TRUE, 3, NOW() - INTERVAL '1 day', $2, CURRENT_DATE - 1),
+         ($1, 'Send the invoice', TRUE, 4, NOW() - INTERVAL '1 day', $2, CURRENT_DATE - 1),
+         ($1, 'Book the haircut', TRUE, 5, NOW() - INTERVAL '2 days', $2, CURRENT_DATE - 2)`,
+      [dailyGeneral.id, user.username]
+    );
     // A second shared list carrying only a removal event, so the Home
     // screen can show the 'removed' hint ("@staging-demo-user removed …")
     // without displacing the 'checked' hint on the first shared list —
@@ -1386,6 +1480,11 @@ async function start() {
     -- an explicit off then sticks, because the backfill never runs again.
     ALTER TABLE lists ADD COLUMN IF NOT EXISTS due_dates_enabled BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE lists ALTER COLUMN due_dates_enabled SET DEFAULT TRUE;
+    -- Daily lists (issue #109): NULL or FALSE is an ordinary list. Append-only,
+    -- no default and no backfill.
+    ALTER TABLE lists ADD COLUMN IF NOT EXISTS daily_enabled BOOLEAN;
+    -- The latest local day a rollover ran for. Only ever moves forward.
+    ALTER TABLE lists ADD COLUMN IF NOT EXISTS last_rollover_date DATE;
     COMMENT ON TABLE lists IS 'staging:private';
 
     CREATE TABLE IF NOT EXISTS list_members (

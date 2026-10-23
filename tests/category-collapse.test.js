@@ -34,7 +34,7 @@ function fnSource(name) {
 
 const LIFTED = [
   'showCompleted', 'setShowCompleted', 'isCatFullyDone', 'catShowDone',
-  'collapsedSet', 'resetCollapsed', 'persistCollapsed', 'catCollapsed',
+  'collapsedSet', 'resetCollapsed', 'resetOpenDays', 'persistCollapsed', 'catCollapsed',
   'setCatCollapsed', 'clearKeepOpen', 'toggleItem', 'toggleCatCollapsed',
 ];
 
